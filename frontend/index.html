@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AI 도면 3D 공간 재설계</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Noto Sans KR', 'Apple SD Gothic Neo', sans-serif;
+      background: #0f0f13;
+      color: #e8e8e8;
+      min-height: 100vh;
+    }
+
+    /* ── 헤더 ── */
+    header {
+      padding: 20px 32px;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+    }
+    header span {
+      font-size: 11px;
+      background: #1a6cf5;
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    /* ── 메인 레이아웃 ── */
+    main {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      grid-template-rows: 1fr auto;
+      height: calc(100vh - 61px);
+    }
+
+    /* ── 사이드바 (업로드 + 버튼) ── */
+    .sidebar {
+      background: #16161c;
+      border-right: 1px solid #222;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+
+    /* 업로드 영역 */
+    .upload-zone {
+      border: 2px dashed #333;
+      border-radius: 8px;
+      padding: 28px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: #1a6cf5;
+      background: rgba(26,108,245,0.05);
+    }
+    .upload-zone .icon { font-size: 32px; margin-bottom: 8px; }
+    .upload-zone p { font-size: 13px; color: #888; }
+    .upload-zone p strong { color: #ccc; }
+    #file-input { display: none; }
+
+    /* 업로드된 도면 미리보기 */
+    #preview-box {
+      display: none;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #1e1e26;
+    }
+    #preview-box img {
+      width: 100%;
+      height: 160px;
+      object-fit: contain;
+      padding: 8px;
+    }
+    #preview-box .file-info {
+      padding: 8px 12px;
+      font-size: 11px;
+      color: #666;
+      border-top: 1px solid #2a2a33;
+    }
+
+    /* 세대 정보 */
+    #unit-info {
+      display: none;
+      background: #1e1e26;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+    }
+    #unit-info .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid #2a2a33;
+    }
+    #unit-info .info-row:last-child { border-bottom: none; }
+    #unit-info .info-label { color: #888; }
+    #unit-info .info-value { color: #e8e8e8; font-weight: 500; }
+
+    /* 버튼 */
+    .action-btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-asis {
+      background: #1e1e26;
+      color: #e8e8e8;
+      border: 1px solid #333;
+    }
+    .btn-asis:hover { background: #2a2a36; border-color: #555; }
+    .btn-redesign {
+      background: #1a6cf5;
+      color: #fff;
+    }
+    .btn-redesign:hover { background: #1558d0; }
+    .action-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* ── 3D 뷰어 영역 ── */
+    .viewer-area {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr;
+      gap: 1px;
+      background: #222;
+      grid-row: 1;
+      grid-column: 2;
+    }
+
+    .viewer-panel {
+      background: #0f0f13;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .viewer-label {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #666;
+      background: rgba(0,0,0,0.5);
+      padding: 4px 10px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .viewer-placeholder {
+      text-align: center;
+      color: #333;
+    }
+    .viewer-placeholder .big-icon { font-size: 48px; margin-bottom: 12px; }
+    .viewer-placeholder p { font-size: 13px; }
+
+    /* ── 인테리어 프롬프트 바 ── */
+    .prompt-bar {
+      grid-row: 2;
+      grid-column: 2;
+      background: #16161c;
+      border-top: 1px solid #222;
+      padding: 14px 20px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .prompt-bar input {
+      flex: 1;
+      background: #1e1e26;
+      border: 1px solid #2a2a33;
+      border-radius: 8px;
+      padding: 10px 16px;
+      color: #e8e8e8;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .prompt-bar input:focus { border-color: #1a6cf5; }
+    .prompt-bar input::placeholder { color: #444; }
+
+    .prompt-btn {
+      background: #1a6cf5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.2s;
+    }
+    .prompt-btn:hover { background: #1558d0; }
+    .prompt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* 상태 메시지 */
+    #status-msg {
+      font-size: 12px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      display: none;
+    }
+    #status-msg.info  { background: rgba(26,108,245,0.15); color: #6aa3ff; }
+    #status-msg.error { background: rgba(245,80,60,0.15);  color: #ff7060; }
+    #status-msg.ok    { background: rgba(40,200,100,0.15); color: #50d080; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>AI 도면 3D 공간 재설계</h1>
+  <span>BETA</span>
+</header>
+
+<main>
+  <!-- 사이드바 -->
+  <aside class="sidebar">
+
+    <div>
+      <div class="section-title">도면 업로드</div>
+      <div class="upload-zone" id="upload-zone">
+        <div class="icon">📐</div>
+        <p><strong>클릭 또는 드래그</strong>하여<br>도면 이미지 업로드</p>
+        <p style="margin-top:6px;font-size:11px">PNG · JPG · PDF</p>
+      </div>
+      <input type="file" id="file-input" accept="image/*,.pdf"/>
+    </div>
+
+    <!-- 미리보기 -->
+    <div id="preview-box">
+      <img id="preview-img" src="" alt="미리보기"/>
+      <div class="file-info" id="file-info"></div>
+    </div>
+
+    <!-- 세대 정보 -->
+    <div id="unit-info">
+      <div class="section-title">추출된 도면 정보</div>
+      <div class="info-row">
+        <span class="info-label">세대</span>
+        <span class="info-value" id="info-unit">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">전용면적</span>
+        <span class="info-value" id="info-area">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">실사용공간</span>
+        <span class="info-value" id="info-usable">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">외곽 꼭짓점</span>
+        <span class="info-value" id="info-pts">-</span>
+      </div>
+    </div>
+
+    <!-- 상태 메시지 -->
+    <div id="status-msg"></div>
+
+    <!-- 버튼 1 -->
+    <div>
+      <div class="section-title">3D 변환</div>
+      <button class="action-btn btn-asis" id="btn-asis" disabled>
+        📋 버튼 1 — 도면 그대로 3D화
+      </button>
+    </div>
+
+    <!-- 버튼 2 -->
+    <button class="action-btn btn-redesign" id="btn-redesign" disabled>
+      ✨ 버튼 2 — AI 최적 구조 재설계
+    </button>
+
+  </aside>
+
+  <!-- 3D 뷰어 (좌: As-Is, 우: To-Be) -->
+  <div class="viewer-area">
+    <div class="viewer-panel" id="viewer-asis">
+      <div class="viewer-label">As-Is · 도면 그대로</div>
+      <div class="viewer-placeholder">
+        <div class="big-icon">🏗️</div>
+        <p>버튼 1을 누르면<br>3D 모델이 여기에 표시됩니다</p>
+      </div>
+    </div>
+    <div class="viewer-panel" id="viewer-tobe">
+      <div class="viewer-label">To-Be · AI 재설계</div>
+      <div class="viewer-placeholder">
+        <div class="big-icon">✨</div>
+        <p>버튼 2를 누르면<br>AI 재설계 모델이 표시됩니다</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 인테리어 프롬프트 바 -->
+  <div class="prompt-bar">
+    <input
+      type="text"
+      id="prompt-input"
+      placeholder="인테리어 스타일 입력 (예: 모던 미니멀, 북유럽 우드톤, 따뜻한 빈티지)"
+      disabled
+    />
+    <button class="prompt-btn" id="prompt-btn" disabled>
+      적용
+    </button>
+  </div>
+</main>
+
+<script>
+const API = "http://localhost:8000";
+let jobId = null;
+
+// ── 업로드 영역 클릭 ──
+const zone    = document.getElementById("upload-zone");
+const fileIn  = document.getElementById("file-input");
+
+zone.addEventListener("click", () => fileIn.click());
+zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("drag-over"); });
+zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
+zone.addEventListener("drop", e => {
+  e.preventDefault();
+  zone.classList.remove("drag-over");
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileIn.addEventListener("change", e => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+// ── 파일 처리 ──
+async function handleFile(file) {
+  // 미리보기
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById("preview-img").src = e.target.result;
+    document.getElementById("preview-box").style.display = "block";
+    document.getElementById("file-info").textContent =
+      `${file.name}  ·  ${(file.size / 1024).toFixed(0)} KB`;
+  };
+  reader.readAsDataURL(file);
+
+  showStatus("도면 분석 중...", "info");
+
+  // 서버에 업로드
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const res  = await fetch(`${API}/api/upload`, { method: "POST", body: form });
+    const data = await res.json();
+
+    jobId = data.job_id;
+
+    // 세대 정보 표시
+    document.getElementById("info-unit").textContent   = data.unit_name;
+    document.getElementById("info-area").textContent   = `${data.area_m2}m²`;
+    document.getElementById("info-usable").textContent = `${data.usable_area_m2}m²`;
+    document.getElementById("info-pts").textContent    = `${data.outline_px.length}개`;
+    document.getElementById("unit-info").style.display = "block";
+
+    // 버튼 활성화
+    document.getElementById("btn-asis").disabled     = false;
+    document.getElementById("btn-redesign").disabled = false;
+
+    showStatus("도면 분석 완료. 3D 변환 버튼을 누르세요.", "ok");
+
+  } catch (err) {
+    showStatus("서버 연결 실패. 백엔드가 실행 중인지 확인하세요.", "error");
+  }
+}
+
+// ── 버튼 1: 도면 그대로 3D화 ──
+document.getElementById("btn-asis").addEventListener("click", async () => {
+  if (!jobId) return;
+  showStatus("도면 그대로 3D화 중...", "info");
+  const res  = await fetch(`${API}/api/build3d/asis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId })
+  });
+  const data = await res.json();
+  showStatus(data.message, "ok");
+  // TODO: GLB 파일을 Three.js로 로드
+});
+
+// ── 버튼 2: AI 재설계 ──
+document.getElementById("btn-redesign").addEventListener("click", async () => {
+  if (!jobId) return;
+  showStatus("MD 규칙 검증 후 AI 재설계 중...", "info");
+
+  // 스케치 기반 배치 데이터 (추후 AI가 자동 생성)
+  const redesign_payload = {
+    job_id: jobId,
+    entrance_point_mm: [4752, 7220],
+    rooms: [
+      { name: "거실",     polygon_mm: makeRect(3623, 435, 7201, 3534), has_window: true },
+      { name: "부엌",     polygon_mm: makeRect(8259, 435, 9941, 3534), has_window: true },
+      { name: "안방",     polygon_mm: makeRect(3623, 3534, 8259, 7220), has_window: true },
+      { name: "방2",      polygon_mm: makeRect(302, 3534, 3623, 5783), has_window: true },
+      { name: "방3",      polygon_mm: makeRect(302, 435, 3623, 3534), has_window: true },
+      { name: "공용욕실", polygon_mm: makeRect(4914, 7220, 6256, 8505), has_window: false },
+      { name: "다용도실", polygon_mm: makeRect(302, 435, 3623, 1835), has_window: false },
+    ]
+  };
+
+  const res  = await fetch(`${API}/api/build3d/redesign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(redesign_payload)
+  });
+  const data = await res.json();
+
+  if (data.status === "validation_failed") {
+    showStatus("규칙 위반: " + data.errors[0], "error");
+  } else {
+    showStatus(data.message, "ok");
+    // 인테리어 프롬프트 활성화
+    document.getElementById("prompt-input").disabled = false;
+    document.getElementById("prompt-btn").disabled   = false;
+  }
+});
+
+// ── 인테리어 프롬프트 ──
+document.getElementById("prompt-btn").addEventListener("click", async () => {
+  const prompt = document.getElementById("prompt-input").value.trim();
+  if (!prompt || !jobId) return;
+  showStatus(`'${prompt}' 스타일 적용 중...`, "info");
+  const res  = await fetch(`${API}/api/interior`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, prompt })
+  });
+  const data = await res.json();
+  showStatus(data.message, "ok");
+});
+
+// ── 유틸 ──
+function makeRect(x1, y1, x2, y2) {
+  return [[x1,y1],[x2,y1],[x2,y2],[x1,y2]];
+}
+
+function showStatus(msg, type) {
+  const el = document.getElementById("status-msg");
+  el.textContent  = msg;
+  el.className    = type;
+  el.style.display = "block";
+}
+</script>
+</body>
+</html>
