@@ -1,4 +1,4 @@
-# server.py — FastAPI 백엔드
+# server.py
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -50,8 +50,8 @@ async def build_redesign(payload: dict):
 async def apply_interior(payload: dict):
     prompt = payload.get("prompt", "")
     job_id = payload.get("job_id", "")
-    return {"job_id": job_id, "prompt": prompt, "status": "queued", "message": f'{prompt}' 스타일 적용 중..."}
+    msg = prompt + " 스타일 적용 중..."
+    return {"job_id": job_id, "prompt": prompt, "status": "queued", "message": msg}
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
-
