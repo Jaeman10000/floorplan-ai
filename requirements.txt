@@ -3,3 +3,8 @@ uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 shapely>=2.0
 pydantic>=2.7
+opencv-python-headless>=4.8
+numpy>=1.24
+Pillow>=10.0
+pytesseract>=0.3.10
+ezdxf>=1.1
