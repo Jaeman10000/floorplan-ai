@@ -8,3 +8,5 @@ numpy>=1.24
 Pillow>=10.0
 pytesseract>=0.3.10
 ezdxf>=1.1
+httpx>=0.25.0
+
