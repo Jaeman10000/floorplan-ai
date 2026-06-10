@@ -153,7 +153,7 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
             "content-type": "application/json",
         },
         json={
-            "model": "claude-opus-4-5",
+            "model": "claude-opus-4-8",
             "max_tokens": 4096,
             "messages": [{
                 "role": "user",
