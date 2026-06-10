@@ -282,7 +282,7 @@ def _extract_with_opencv(
         raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
 
     h, w = img.shape[:2]
-    _, thresh = _preprocess(img)
+    gray, thresh = _preprocess(img)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
@@ -295,33 +295,54 @@ def _extract_with_opencv(
         warnings.append("외곽 후보 부족 — 가장 큰 윤곽 사용")
 
     main = max(valid, key=cv2.contourArea)
-    peri = cv2.arcLength(main, True)
-    approx = cv2.approxPolyDP(main, epsilon_ratio * peri, True)
-    if len(approx) > 20:
-        approx = cv2.approxPolyDP(main, 0.02 * peri, True)
-        warnings.append(f"꼭짓점 과다 — 단순화 ({len(approx)}개)")
 
+    # 적응형 단순화 — 사각형으로 뭉개지 않고 오각형/L자형 오목 코너까지 보존
+    approx = _simplify_contour(main, epsilon_ratio, area_tol=0.02, max_vertices=24)
     pts_px = [(int(p[0][0]), int(p[0][1])) for p in approx]
+    if len(pts_px) <= 4:
+        warnings.append(f"단순 다각형으로 인식됨 ({len(pts_px)}각형) — 복잡 외곽이면 입력 이미지 품질 확인 필요")
 
-    # 스케일 결정
-    scale = scale_hint or (10000.0 / w)
-    if known_area_m2:
+    # 치수선 OCR — 도면 내 mm 숫자 인식
+    dimensions = _ocr_dimensions(gray, warnings)
+
+    # 스케일 결정 — 우선순위: 명시 힌트 > 알려진 면적 > 치수선 OCR > 이미지 너비 추정
+    bbox_w = max(p[0] for p in pts_px) - min(p[0] for p in pts_px)
+    bbox_h = max(p[1] for p in pts_px) - min(p[1] for p in pts_px)
+    bbox_max_px = max(bbox_w, bbox_h, 1)
+
+    scale = None
+    if scale_hint:
+        scale = scale_hint
+    elif known_area_m2:
         area_px2 = _shoelace_area_px2(pts_px)
         if area_px2 > 0:
             scale = math.sqrt(known_area_m2 * 1e6 / area_px2)
-    if not scale_hint and not known_area_m2:
+    elif dimensions:
+        # 가장 큰 치수값이 건물 전체 폭/높이에 대응한다고 가정
+        scale = max(dimensions) / bbox_max_px
+        warnings.append(f"치수선 OCR 기반 스케일 추정 (최대 {max(dimensions):.0f}mm / {bbox_max_px}px)")
+
+    if scale is None or scale <= 0:
+        scale = 10000.0 / w
         warnings.append("스케일 자동 결정 실패 — 이미지 너비=10,000mm 가정")
 
     pts_mm = [(x * scale, y * scale) for x, y in pts_px]
     area_m2 = _shoelace_area_m2(pts_mm)
+
+    # 신뢰도 — 치수선을 읽었으면 가산
+    confidence = 0.4
+    if dimensions:
+        confidence = 0.6
+    if scale_hint or known_area_m2:
+        confidence = 0.65
 
     return ExtractionResult(
         pts_px=pts_px,
         pts_mm=pts_mm,
         scale_mm_per_px=scale,
         area_m2=round(area_m2, 2),
-        confidence=0.4,
-        ocr_dimensions=[],
+        confidence=confidence,
+        ocr_dimensions=dimensions,
         warnings=warnings,
         units=[],
         common_areas=[],
@@ -381,6 +402,101 @@ def _preprocess(img):
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
     opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
     return gray, opened
+
+
+def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=24):
+    """
+    윤곽을 다각형으로 단순화하되, 오각형/L자형 등 오목 코너를 보존한다.
+
+    고정 epsilon은 작은 노치(notch)를 가진 외곽을 사각형으로 뭉개버린다.
+    대신 '원본 윤곽 면적과 area_tol 이내로 일치하는 가장 단순한 다각형'을
+    epsilon 이진 탐색으로 찾아, 노이즈는 제거하고 실제 코너는 유지한다.
+    """
+    peri = cv2.arcLength(contour, True)
+    true_area = cv2.contourArea(contour)
+    if peri <= 0 or true_area <= 0:
+        return cv2.approxPolyDP(contour, epsilon_ratio * peri, True)
+
+    def fits(eps):
+        """eps로 근사한 다각형이 면적 오차 허용 범위 안인가"""
+        ap = cv2.approxPolyDP(contour, eps, True)
+        if len(ap) < 3:
+            return False, ap
+        area = cv2.contourArea(ap)
+        return abs(area - true_area) / true_area <= area_tol, ap
+
+    # eps 범위: 둘레의 0.05% ~ 5%
+    lo, hi = peri * 0.0005, peri * 0.05
+    best = cv2.approxPolyDP(contour, lo, True)
+
+    # 이진 탐색: 면적 오차를 만족하는 '가장 큰' eps(=가장 단순) 찾기
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        ok, ap = fits(mid)
+        if ok:
+            best = ap          # 더 단순화해도 면적이 유지됨 → eps 키워봄
+            lo = mid
+        else:
+            hi = mid           # 너무 뭉개짐 → eps 줄임
+
+    # 꼭짓점이 여전히 너무 많으면(노이즈 잔존) 단계적으로 더 단순화
+    if len(best) > max_vertices:
+        for k in (0.01, 0.02, 0.03):
+            ap = cv2.approxPolyDP(contour, k * peri, True)
+            if len(ap) <= max_vertices:
+                best = ap
+                break
+
+    return best
+
+
+def _ocr_dimensions(gray, warnings):
+    """
+    도면 이미지에서 치수선 숫자(mm)를 OCR로 읽는다.
+    pytesseract/Tesseract 미설치 시 빈 리스트 반환(파이프라인 비중단).
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        warnings.append("pytesseract 미설치 — 치수선 OCR 건너뜀")
+        return []
+
+    # Windows에서 Tesseract 실행 파일 경로가 환경변수로 지정된 경우 적용
+    tess_cmd = os.environ.get("TESSERACT_CMD")
+    if tess_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tess_cmd
+
+    try:
+        # 숫자/일부 단위 문자만 허용해 오인식 감소
+        config = "--psm 11 -c tessedit_char_whitelist=0123456789"
+        data = pytesseract.image_to_data(
+            gray, config=config, output_type=pytesseract.Output.DICT
+        )
+    except Exception as e:
+        warnings.append(f"Tesseract 실행 실패 — 치수선 OCR 건너뜀: {str(e)[:60]}")
+        return []
+
+    dims = []
+    for token, conf in zip(data.get("text", []), data.get("conf", [])):
+        token = token.strip()
+        if not token.isdigit():
+            continue
+        try:
+            conf_val = float(conf)
+        except (ValueError, TypeError):
+            conf_val = -1.0
+        if conf_val < 30:          # 저신뢰 인식 제거
+            continue
+        value = int(token)
+        # 건축 치수로 타당한 범위(mm): 100mm ~ 100m
+        if 100 <= value <= 100000:
+            dims.append(float(value))
+
+    if not dims:
+        warnings.append("치수선 숫자를 인식하지 못함")
+
+    # 중복 제거 + 내림차순(큰 치수가 전체 폭/높이일 확률 높음)
+    return sorted(set(dims), reverse=True)
 
 def _shoelace_area_px2(pts):
     n = len(pts); area = 0.0
