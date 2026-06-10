@@ -4,6 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AI 도면 3D 공간 재설계</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -16,58 +17,67 @@
 
     /* ── 헤더 ── */
     header {
-      padding: 20px 32px;
+      padding: 16px 28px;
       border-bottom: 1px solid #222;
       display: flex;
       align-items: center;
       gap: 12px;
     }
-    header h1 {
-      font-size: 18px;
-      font-weight: 600;
-      color: #fff;
-    }
-    header span {
-      font-size: 11px;
+    header h1 { font-size: 17px; font-weight: 600; color: #fff; }
+    header .badge {
+      font-size: 10px;
       background: #1a6cf5;
       color: #fff;
       padding: 2px 8px;
       border-radius: 4px;
     }
+    header .status-dot {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #555;
+    }
+    header .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #555;
+    }
+    header .dot.online { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
 
     /* ── 메인 레이아웃 ── */
     main {
       display: grid;
-      grid-template-columns: 320px 1fr;
-      grid-template-rows: 1fr auto;
-      height: calc(100vh - 61px);
+      grid-template-columns: 300px 1fr;
+      height: calc(100vh - 53px);
     }
 
-    /* ── 사이드바 (업로드 + 버튼) ── */
+    /* ── 사이드바 ── */
     .sidebar {
-      background: #16161c;
-      border-right: 1px solid #222;
-      padding: 24px;
+      background: #13131a;
+      border-right: 1px solid #1e1e28;
+      padding: 20px;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 18px;
       overflow-y: auto;
     }
 
-    .section-title {
-      font-size: 11px;
-      font-weight: 600;
+    .section-label {
+      font-size: 10px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 1px;
-      color: #666;
-      margin-bottom: 8px;
+      letter-spacing: 1.2px;
+      color: #444;
+      margin-bottom: 6px;
     }
 
-    /* 업로드 영역 */
+    /* 업로드 존 */
     .upload-zone {
-      border: 2px dashed #333;
-      border-radius: 8px;
-      padding: 28px 16px;
+      border: 2px dashed #2a2a35;
+      border-radius: 10px;
+      padding: 24px 12px;
       text-align: center;
       cursor: pointer;
       transition: all 0.2s;
@@ -76,306 +86,347 @@
       border-color: #1a6cf5;
       background: rgba(26,108,245,0.05);
     }
-    .upload-zone .icon { font-size: 32px; margin-bottom: 8px; }
-    .upload-zone p { font-size: 13px; color: #888; }
-    .upload-zone p strong { color: #ccc; }
+    .upload-zone .icon { font-size: 28px; margin-bottom: 8px; }
+    .upload-zone p { font-size: 12px; color: #666; line-height: 1.6; }
+    .upload-zone p strong { color: #aaa; }
     #file-input { display: none; }
 
-    /* 업로드된 도면 미리보기 */
+    /* 미리보기 */
     #preview-box {
       display: none;
       border-radius: 8px;
       overflow: hidden;
-      background: #1e1e26;
+      background: #1a1a22;
+      border: 1px solid #2a2a35;
     }
     #preview-box img {
-      width: 100%;
-      height: 160px;
-      object-fit: contain;
-      padding: 8px;
+      width: 100%; height: 140px;
+      object-fit: contain; padding: 8px;
     }
     #preview-box .file-info {
-      padding: 8px 12px;
-      font-size: 11px;
-      color: #666;
-      border-top: 1px solid #2a2a33;
+      padding: 6px 10px;
+      font-size: 10px; color: #555;
+      border-top: 1px solid #2a2a35;
     }
 
-    /* 세대 정보 */
+    /* 분석 결과 */
     #unit-info {
       display: none;
-      background: #1e1e26;
+      background: #1a1a22;
+      border: 1px solid #2a2a35;
       border-radius: 8px;
-      padding: 14px;
-      font-size: 12px;
+      padding: 12px;
     }
-    #unit-info .info-row {
+    .info-row {
       display: flex;
       justify-content: space-between;
-      padding: 4px 0;
-      border-bottom: 1px solid #2a2a33;
+      padding: 5px 0;
+      font-size: 12px;
+      border-bottom: 1px solid #222;
     }
-    #unit-info .info-row:last-child { border-bottom: none; }
-    #unit-info .info-label { color: #888; }
-    #unit-info .info-value { color: #e8e8e8; font-weight: 500; }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: #666; }
+    .info-value { color: #ddd; font-weight: 500; }
+
+    /* 상태 메시지 */
+    #status-msg {
+      display: none;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    #status-msg.info    { background: #1a2a3a; border-left: 3px solid #1a6cf5; color: #7eb8f7; }
+    #status-msg.ok      { background: #0f2a1a; border-left: 3px solid #22c55e; color: #6ee7a0; }
+    #status-msg.error   { background: #2a0f0f; border-left: 3px solid #ef4444; color: #fca5a5; }
+    #status-msg.loading { background: #1e1a2a; border-left: 3px solid #a855f7; color: #c4b5fd; }
 
     /* 버튼 */
     .action-btn {
       width: 100%;
-      padding: 14px;
+      padding: 12px;
       border: none;
       border-radius: 8px;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
     }
-    .btn-asis {
-      background: #1e1e26;
-      color: #e8e8e8;
-      border: 1px solid #333;
-    }
-    .btn-asis:hover { background: #2a2a36; border-color: #555; }
-    .btn-redesign {
-      background: #1a6cf5;
-      color: #fff;
-    }
-    .btn-redesign:hover { background: #1558d0; }
-    .action-btn:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
+    .action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-primary { background: #1a6cf5; color: #fff; }
+    .btn-primary:not(:disabled):hover { background: #2878ff; }
+    .btn-secondary { background: #1e1e28; color: #ccc; border: 1px solid #2a2a35; }
+    .btn-secondary:not(:disabled):hover { background: #252530; border-color: #3a3a45; }
+    .btn-accent { background: #7c3aed; color: #fff; }
+    .btn-accent:not(:disabled):hover { background: #8b5cf6; }
 
-    /* ── 3D 뷰어 영역 ── */
+    /* 프롬프트 입력 */
+    .prompt-wrap {
+      display: flex;
+      gap: 6px;
+    }
+    #prompt-input {
+      flex: 1;
+      background: #1a1a22;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #ddd;
+      font-size: 12px;
+      outline: none;
+    }
+    #prompt-input:focus { border-color: #7c3aed; }
+    #prompt-input::placeholder { color: #444; }
+    #prompt-input:disabled { opacity: 0.4; }
+    #prompt-btn {
+      padding: 10px 14px;
+      background: #7c3aed;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    #prompt-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* DXF 다운로드 버튼 */
+    #btn-dxf {
+      background: #0f2a1a;
+      color: #6ee7a0;
+      border: 1px solid #22c55e44;
+    }
+    #btn-dxf:not(:disabled):hover { background: #0f3a22; }
+
+    /* ── 뷰어 영역 ── */
     .viewer-area {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      grid-template-rows: 1fr;
       gap: 1px;
-      background: #222;
-      grid-row: 1;
-      grid-column: 2;
+      background: #1e1e28;
+      overflow: hidden;
     }
 
     .viewer-panel {
       background: #0f0f13;
       position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      overflow: hidden;
     }
 
     .viewer-label {
       position: absolute;
-      top: 14px;
-      left: 14px;
+      top: 12px; left: 12px;
       font-size: 11px;
       font-weight: 600;
-      color: #666;
-      background: rgba(0,0,0,0.5);
+      color: #555;
+      background: rgba(15,15,19,0.85);
       padding: 4px 10px;
-      border-radius: 4px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
+      border-radius: 20px;
+      border: 1px solid #222;
+      z-index: 10;
+      letter-spacing: 0.5px;
     }
 
     .viewer-placeholder {
-      text-align: center;
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
       color: #333;
     }
-    .viewer-placeholder .big-icon { font-size: 48px; margin-bottom: 12px; }
-    .viewer-placeholder p { font-size: 13px; }
+    .viewer-placeholder .big-icon { font-size: 40px; margin-bottom: 10px; }
+    .viewer-placeholder p { font-size: 12px; }
 
-    /* ── 인테리어 프롬프트 바 ── */
-    .prompt-bar {
-      grid-row: 2;
-      grid-column: 2;
-      background: #16161c;
-      border-top: 1px solid #222;
-      padding: 14px 20px;
-      display: flex;
-      gap: 10px;
-      align-items: center;
+    canvas.three-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100% !important;
+      height: 100% !important;
     }
 
-    .prompt-bar input {
-      flex: 1;
-      background: #1e1e26;
-      border: 1px solid #2a2a33;
-      border-radius: 8px;
-      padding: 10px 16px;
-      color: #e8e8e8;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    .prompt-bar input:focus { border-color: #1a6cf5; }
-    .prompt-bar input::placeholder { color: #444; }
-
-    .prompt-btn {
-      background: #1a6cf5;
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      padding: 10px 20px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: background 0.2s;
-    }
-    .prompt-btn:hover { background: #1558d0; }
-    .prompt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-    /* 상태 메시지 */
-    #status-msg {
-      font-size: 12px;
-      padding: 8px 12px;
-      border-radius: 6px;
+    /* 진행 바 */
+    .progress-bar {
       display: none;
+      height: 2px;
+      background: #1a2a3a;
+      border-radius: 1px;
+      overflow: hidden;
     }
-    #status-msg.info  { background: rgba(26,108,245,0.15); color: #6aa3ff; }
-    #status-msg.error { background: rgba(245,80,60,0.15);  color: #ff7060; }
-    #status-msg.ok    { background: rgba(40,200,100,0.15); color: #50d080; }
+    .progress-bar .fill {
+      height: 100%;
+      background: linear-gradient(90deg, #1a6cf5, #7c3aed);
+      animation: progress-anim 1.5s ease-in-out infinite;
+    }
+    @keyframes progress-anim {
+      0%   { width: 0%; margin-left: 0; }
+      50%  { width: 60%; margin-left: 20%; }
+      100% { width: 0%; margin-left: 100%; }
+    }
+
+    /* 뷰어 컨트롤 힌트 */
+    .viewer-hint {
+      position: absolute;
+      bottom: 10px; right: 10px;
+      font-size: 10px; color: #333;
+      text-align: right;
+      line-height: 1.6;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
 
 <header>
-  <h1>AI 도면 3D 공간 재설계</h1>
-  <span>BETA</span>
+  <span style="font-size:18px">🏢</span>
+  <h1>AI 도면 3D 재설계</h1>
+  <span class="badge">Beta</span>
+  <div class="status-dot">
+    <div class="dot" id="server-dot"></div>
+    <span id="server-status">서버 확인 중...</span>
+  </div>
 </header>
 
 <main>
-  <!-- 사이드바 -->
-  <aside class="sidebar">
+  <!-- ── 사이드바 ── -->
+  <div class="sidebar">
 
     <div>
-      <div class="section-title">도면 업로드</div>
+      <div class="section-label">도면 업로드</div>
       <div class="upload-zone" id="upload-zone">
         <div class="icon">📐</div>
-        <p><strong>클릭 또는 드래그</strong>하여<br>도면 이미지 업로드</p>
-        <p style="margin-top:6px;font-size:11px">PNG · JPG · PDF</p>
+        <p><strong>클릭하거나 파일을 드래그</strong><br>JPG, PNG, PDF 지원</p>
       </div>
-      <input type="file" id="file-input" accept="image/*,.pdf"/>
+      <input type="file" id="file-input" accept="image/*,.pdf">
     </div>
 
-    <!-- 미리보기 -->
     <div id="preview-box">
-      <img id="preview-img" src="" alt="미리보기"/>
+      <img id="preview-img" src="" alt="미리보기">
       <div class="file-info" id="file-info"></div>
     </div>
 
-    <!-- 세대 정보 -->
-    <div id="unit-info">
-      <div class="section-title">추출된 도면 정보</div>
-      <div class="info-row">
-        <span class="info-label">세대</span>
-        <span class="info-value" id="info-unit">-</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">전용면적</span>
-        <span class="info-value" id="info-area">-</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">실사용공간</span>
-        <span class="info-value" id="info-usable">-</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">외곽 꼭짓점</span>
-        <span class="info-value" id="info-pts">-</span>
-      </div>
-    </div>
-
-    <!-- 상태 메시지 -->
+    <div class="progress-bar" id="progress-bar"><div class="fill"></div></div>
     <div id="status-msg"></div>
 
-    <!-- 버튼 1 -->
+    <div id="unit-info">
+      <div class="section-label" style="margin-bottom:10px">분석 결과</div>
+      <div class="info-row">
+        <span class="info-label">면적</span>
+        <span class="info-value" id="info-area">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">외곽 좌표</span>
+        <span class="info-value" id="info-pts">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">스케일</span>
+        <span class="info-value" id="info-scale">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">신뢰도</span>
+        <span class="info-value" id="info-conf">—</span>
+      </div>
+    </div>
+
     <div>
-      <div class="section-title">3D 변환</div>
-      <button class="action-btn btn-asis" id="btn-asis" disabled>
-        📋 버튼 1 — 도면 그대로 3D화
-      </button>
-    </div>
-
-    <!-- 버튼 2 -->
-    <button class="action-btn btn-redesign" id="btn-redesign" disabled>
-      ✨ 버튼 2 — AI 최적 구조 재설계
-    </button>
-
-  </aside>
-
-  <!-- 3D 뷰어 (좌: As-Is, 우: To-Be) -->
-  <div class="viewer-area">
-    <div class="viewer-panel" id="viewer-asis">
-      <div class="viewer-label">As-Is · 도면 그대로</div>
-      <div class="viewer-placeholder">
-        <div class="big-icon">🏗️</div>
-        <p>버튼 1을 누르면<br>3D 모델이 여기에 표시됩니다</p>
+      <div class="section-label">3D 변환</div>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <button class="action-btn btn-primary" id="btn-asis" disabled>
+          🏗️ 도면 그대로 3D화
+        </button>
+        <button class="action-btn btn-secondary" id="btn-redesign" disabled>
+          ✨ AI 재설계
+        </button>
+        <button class="action-btn btn-secondary" id="btn-dxf" disabled>
+          📄 DXF 다운로드
+        </button>
       </div>
     </div>
-    <div class="viewer-panel" id="viewer-tobe">
-      <div class="viewer-label">To-Be · AI 재설계</div>
-      <div class="viewer-placeholder">
-        <div class="big-icon">✨</div>
-        <p>버튼 2를 누르면<br>AI 재설계 모델이 표시됩니다</p>
+
+    <div>
+      <div class="section-label">인테리어 스타일</div>
+      <div class="prompt-wrap">
+        <input type="text" id="prompt-input" placeholder="모던 미니멀, 북유럽풍..." disabled>
+        <button id="prompt-btn" disabled>적용</button>
       </div>
     </div>
+
   </div>
 
-  <!-- 인테리어 프롬프트 바 -->
-  <div class="prompt-bar">
-    <input
-      type="text"
-      id="prompt-input"
-      placeholder="인테리어 스타일 입력 (예: 모던 미니멀, 북유럽 우드톤, 따뜻한 빈티지)"
-      disabled
-    />
-    <button class="prompt-btn" id="prompt-btn" disabled>
-      적용
-    </button>
+  <!-- ── 3D 뷰어 ── -->
+  <div class="viewer-area">
+    <div class="viewer-panel" id="panel-asis">
+      <div class="viewer-label">As-Is · 현황</div>
+      <div class="viewer-placeholder" id="ph-asis">
+        <div class="big-icon">🏠</div>
+        <p>도면을 업로드하면<br>현황 3D가 표시됩니다</p>
+      </div>
+      <div class="viewer-hint">드래그: 회전 · 휠: 줌 · 우클릭: 이동</div>
+    </div>
+    <div class="viewer-panel" id="panel-tobe">
+      <div class="viewer-label">To-Be · 재설계</div>
+      <div class="viewer-placeholder" id="ph-tobe">
+        <div class="big-icon">✨</div>
+        <p>AI 재설계 버튼을 누르면<br>새 배치가 표시됩니다</p>
+      </div>
+      <div class="viewer-hint">드래그: 회전 · 휠: 줌 · 우클릭: 이동</div>
+    </div>
   </div>
 </main>
 
 <script>
-const API = "http://localhost:8000";
-let jobId = null;
+// ── 설정 ──────────────────────────────────────────────────────────────────
+const API = "https://floorplan-ai-production-c244.up.railway.app";
+let jobId  = null;
+let ptsMm  = null;
+let areaM2 = null;
+let renderers = {};
 
-// ── 업로드 영역 클릭 ──
-const zone    = document.getElementById("upload-zone");
-const fileIn  = document.getElementById("file-input");
+// ── 서버 상태 확인 ─────────────────────────────────────────────────────────
+async function checkServer() {
+  try {
+    const res = await fetch(`${API}/`, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      document.getElementById("server-dot").className    = "dot online";
+      document.getElementById("server-status").textContent = "서버 온라인";
+    } else throw new Error();
+  } catch {
+    document.getElementById("server-dot").className    = "dot";
+    document.getElementById("server-status").textContent = "서버 오프라인";
+  }
+}
+checkServer();
 
-zone.addEventListener("click", () => fileIn.click());
-zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("drag-over"); });
+// ── 업로드 영역 ───────────────────────────────────────────────────────────
+const zone   = document.getElementById("upload-zone");
+const fileIn = document.getElementById("file-input");
+
+zone.addEventListener("click",     () => fileIn.click());
+zone.addEventListener("dragover",  e => { e.preventDefault(); zone.classList.add("drag-over"); });
 zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
 zone.addEventListener("drop", e => {
   e.preventDefault();
   zone.classList.remove("drag-over");
   if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
 });
-fileIn.addEventListener("change", e => {
-  if (e.target.files[0]) handleFile(e.target.files[0]);
-});
+fileIn.addEventListener("change", e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
 
-// ── 파일 처리 ──
+// ── 파일 처리 + 업로드 ───────────────────────────────────────────────────
 async function handleFile(file) {
   // 미리보기
   const reader = new FileReader();
   reader.onload = e => {
-    document.getElementById("preview-img").src = e.target.result;
+    document.getElementById("preview-img").src  = e.target.result;
     document.getElementById("preview-box").style.display = "block";
     document.getElementById("file-info").textContent =
-      `${file.name}  ·  ${(file.size / 1024).toFixed(0)} KB`;
+      `${file.name}  ·  ${(file.size/1024).toFixed(0)} KB`;
   };
   reader.readAsDataURL(file);
 
-  showStatus("도면 분석 중...", "info");
+  showStatus("도면 분석 중...", "loading");
+  showProgress(true);
 
-  // 서버에 업로드
   const form = new FormData();
   form.append("file", file);
 
@@ -383,101 +434,294 @@ async function handleFile(file) {
     const res  = await fetch(`${API}/api/upload`, { method: "POST", body: form });
     const data = await res.json();
 
-    jobId = data.job_id;
+    jobId  = data.job_id;
+    ptsMm  = data.pts_mm;
+    areaM2 = data.area_m2;
 
-    // 세대 정보 표시
-    document.getElementById("info-unit").textContent   = data.unit_name;
-    document.getElementById("info-area").textContent   = `${data.area_m2}m²`;
-    document.getElementById("info-usable").textContent = `${data.usable_area_m2}m²`;
-    document.getElementById("info-pts").textContent    = `${data.outline_px.length}개`;
+    // 분석 결과 표시
+    document.getElementById("info-area").textContent  = data.area_m2 ? `${data.area_m2.toFixed(1)}m²` : "—";
+    document.getElementById("info-pts").textContent   = `${(data.pts_mm||[]).length}개`;
+    document.getElementById("info-scale").textContent = data.scale_mm_per_px
+      ? `${data.scale_mm_per_px.toFixed(2)} mm/px` : "—";
+    document.getElementById("info-conf").textContent  = data.confidence
+      ? `${(data.confidence * 100).toFixed(0)}%` : "—";
     document.getElementById("unit-info").style.display = "block";
 
     // 버튼 활성화
-    document.getElementById("btn-asis").disabled     = false;
-    document.getElementById("btn-redesign").disabled = false;
+    ["btn-asis","btn-redesign","btn-dxf"].forEach(id =>
+      document.getElementById(id).disabled = false);
 
-    showStatus("도면 분석 완료. 3D 변환 버튼을 누르세요.", "ok");
+    showStatus("✅ 도면 분석 완료. 3D 변환 버튼을 눌러보세요.", "ok");
+    showProgress(false);
 
   } catch (err) {
-    showStatus("서버 연결 실패. 백엔드가 실행 중인지 확인하세요.", "error");
+    showStatus("❌ 서버 연결 실패. 백엔드 서버가 실행 중인지 확인하세요.", "error");
+    showProgress(false);
   }
 }
 
-// ── 버튼 1: 도면 그대로 3D화 ──
+// ── 버튼: 현황 3D ────────────────────────────────────────────────────────
 document.getElementById("btn-asis").addEventListener("click", async () => {
-  if (!jobId) return;
-  showStatus("도면 그대로 3D화 중...", "info");
-  const res  = await fetch(`${API}/api/build3d/asis`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_id: jobId })
-  });
-  const data = await res.json();
-  showStatus(data.message, "ok");
-  // TODO: GLB 파일을 Three.js로 로드
+  if (!jobId || !ptsMm) return;
+  showStatus("현황 3D 생성 중...", "loading");
+  showProgress(true);
+
+  try {
+    const res  = await fetch(`${API}/api/build3d/asis`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, pts_mm: ptsMm, area_m2: areaM2 }),
+    });
+    const data = await res.json();
+
+    // 뷰어에 외곽선 표시
+    renderOutline("panel-asis", "ph-asis", ptsMm, "asis");
+    showStatus("✅ 현황 3D 생성 완료", "ok");
+  } catch (err) {
+    showStatus("❌ 3D 생성 실패: " + err.message, "error");
+  }
+  showProgress(false);
 });
 
-// ── 버튼 2: AI 재설계 ──
+// ── 버튼: AI 재설계 ──────────────────────────────────────────────────────
 document.getElementById("btn-redesign").addEventListener("click", async () => {
-  if (!jobId) return;
-  showStatus("MD 규칙 검증 후 AI 재설계 중...", "info");
+  if (!jobId || !ptsMm) return;
+  showStatus("AI 재설계 중...", "loading");
+  showProgress(true);
 
-  // 스케치 기반 배치 데이터 (추후 AI가 자동 생성)
-  const redesign_payload = {
-    job_id: jobId,
-    entrance_point_mm: [4752, 7220],
-    rooms: [
-      { name: "거실",     polygon_mm: makeRect(3623, 435, 7201, 3534), has_window: true },
-      { name: "부엌",     polygon_mm: makeRect(8259, 435, 9941, 3534), has_window: true },
-      { name: "안방",     polygon_mm: makeRect(3623, 3534, 8259, 7220), has_window: true },
-      { name: "방2",      polygon_mm: makeRect(302, 3534, 3623, 5783), has_window: true },
-      { name: "방3",      polygon_mm: makeRect(302, 435, 3623, 3534), has_window: true },
-      { name: "공용욕실", polygon_mm: makeRect(4914, 7220, 6256, 8505), has_window: false },
-      { name: "다용도실", polygon_mm: makeRect(302, 435, 3623, 1835), has_window: false },
-    ]
-  };
+  // 기본 방 배치 (pts_mm 기준 자동 분할)
+  const rooms = autoLayoutRooms(ptsMm);
 
-  const res  = await fetch(`${API}/api/build3d/redesign`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(redesign_payload)
-  });
-  const data = await res.json();
+  try {
+    const res  = await fetch(`${API}/api/build3d/redesign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, pts_mm: ptsMm, rooms }),
+    });
+    const data = await res.json();
 
-  if (data.status === "validation_failed") {
-    showStatus("규칙 위반: " + data.errors[0], "error");
-  } else {
-    showStatus(data.message, "ok");
-    // 인테리어 프롬프트 활성화
+    renderRooms("panel-tobe", "ph-tobe", ptsMm, rooms, "tobe");
     document.getElementById("prompt-input").disabled = false;
     document.getElementById("prompt-btn").disabled   = false;
+    showStatus("✅ AI 재설계 완료. 인테리어 스타일을 적용해보세요.", "ok");
+  } catch (err) {
+    showStatus("❌ 재설계 실패: " + err.message, "error");
+  }
+  showProgress(false);
+});
+
+// ── 버튼: DXF 다운로드 ──────────────────────────────────────────────────
+document.getElementById("btn-dxf").addEventListener("click", async () => {
+  if (!jobId || !ptsMm) return;
+  showStatus("DXF 파일 생성 중...", "loading");
+
+  try {
+    const res  = await fetch(`${API}/api/convert-dxf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, pts_mm: ptsMm, area_m2: areaM2 }),
+    });
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url;
+    a.download = `floorplan_${jobId}.dxf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showStatus("✅ DXF 다운로드 완료", "ok");
+  } catch (err) {
+    showStatus("❌ DXF 생성 실패: " + err.message, "error");
   }
 });
 
-// ── 인테리어 프롬프트 ──
+// ── 인테리어 프롬프트 ────────────────────────────────────────────────────
 document.getElementById("prompt-btn").addEventListener("click", async () => {
   const prompt = document.getElementById("prompt-input").value.trim();
   if (!prompt || !jobId) return;
-  showStatus(`'${prompt}' 스타일 적용 중...`, "info");
-  const res  = await fetch(`${API}/api/interior`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_id: jobId, prompt })
-  });
-  const data = await res.json();
-  showStatus(data.message, "ok");
+  showStatus(`'${prompt}' 스타일 적용 중...`, "loading");
+  try {
+    const res  = await fetch(`${API}/api/interior`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, prompt }),
+    });
+    const data = await res.json();
+    showStatus(`✅ ${data.message}`, "ok");
+  } catch (err) {
+    showStatus("❌ 스타일 적용 실패", "error");
+  }
 });
 
-// ── 유틸 ──
-function makeRect(x1, y1, x2, y2) {
-  return [[x1,y1],[x2,y1],[x2,y2],[x1,y2]];
+// ── Three.js: 외곽선 렌더링 ─────────────────────────────────────────────
+function renderOutline(panelId, phId, ptsMm, key) {
+  const panel = document.getElementById(panelId);
+  document.getElementById(phId).style.display = "none";
+
+  if (renderers[key]) {
+    renderers[key].dispose();
+    const old = panel.querySelector("canvas.three-canvas");
+    if (old) old.remove();
+  }
+
+  const W = panel.clientWidth, H = panel.clientHeight;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.domElement.className = "three-canvas";
+  panel.appendChild(renderer.domElement);
+  renderers[key] = renderer;
+
+  const scene  = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f0f13);
+  const camera = new THREE.PerspectiveCamera(45, W/H, 0.1, 1000);
+
+  // pts_mm → Three.js 좌표 (m 단위, Y축 반전)
+  const maxY = Math.max(...ptsMm.map(p => p[1]));
+  const pts3  = ptsMm.map(p => new THREE.Vector3(p[0]/1000, 0, (maxY-p[1])/1000));
+
+  // 중심 계산
+  const cx = pts3.reduce((s,p) => s+p.x, 0) / pts3.length;
+  const cz = pts3.reduce((s,p) => s+p.z, 0) / pts3.length;
+  const maxDist = Math.max(...pts3.map(p =>
+    Math.sqrt((p.x-cx)**2 + (p.z-cz)**2)));
+  camera.position.set(cx, maxDist * 2.2, cz + maxDist * 2);
+  camera.lookAt(cx, 0, cz);
+
+  // 외곽 바닥 면 (반투명)
+  const shape = new THREE.Shape(pts3.map(p => new THREE.Vector2(p.x, p.z)));
+  const geo   = new THREE.ShapeGeometry(shape);
+  const mat   = new THREE.MeshBasicMaterial({ color: 0x1a3a5c, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
+  const mesh  = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  scene.add(mesh);
+
+  // 외곽 라인
+  const linePts = [...pts3, pts3[0]];
+  const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x1a6cf5, linewidth: 2 });
+  scene.add(new THREE.Line(lineGeo, lineMat));
+
+  // 벽 압출 (2.8m)
+  const wallH = 2.8;
+  const extSettings = { depth: wallH, bevelEnabled: false };
+  const wallGeo = new THREE.ExtrudeGeometry(shape, extSettings);
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0x2a2a35, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
+  const wallMesh = new THREE.Mesh(wallGeo, wallMat);
+  wallMesh.rotation.x = -Math.PI / 2;
+  scene.add(wallMesh);
+
+  // 조명
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(cx+5, 10, cz+5);
+  scene.add(dirLight);
+
+  // 그리드
+  const grid = new THREE.GridHelper(Math.max(...ptsMm.map(p=>p[0]))/1000 * 1.5, 20, 0x222228, 0x1a1a22);
+  grid.position.set(cx, -0.01, cz);
+  scene.add(grid);
+
+  // 마우스 컨트롤 (간단 오빗)
+  let isDragging = false, isRightDrag = false;
+  let prevMouse  = {x:0, y:0};
+  let theta = 0.5, phi = 0.8, radius = maxDist * 3;
+  let panX = cx, panZ = cz;
+
+  function updateCamera() {
+    camera.position.set(
+      panX + radius * Math.sin(phi) * Math.sin(theta),
+      radius * Math.cos(phi),
+      panZ + radius * Math.sin(phi) * Math.cos(theta)
+    );
+    camera.lookAt(panX, 0, panZ);
+  }
+  updateCamera();
+
+  renderer.domElement.addEventListener("mousedown", e => {
+    isDragging   = true;
+    isRightDrag  = e.button === 2;
+    prevMouse    = {x: e.clientX, y: e.clientY};
+  });
+  renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
+  window.addEventListener("mouseup",   () => isDragging = false);
+  window.addEventListener("mousemove", e => {
+    if (!isDragging) return;
+    const dx = e.clientX - prevMouse.x;
+    const dy = e.clientY - prevMouse.y;
+    prevMouse = {x: e.clientX, y: e.clientY};
+    if (isRightDrag) {
+      panX -= dx * 0.01;
+      panZ -= dy * 0.01;
+    } else {
+      theta -= dx * 0.008;
+      phi    = Math.max(0.1, Math.min(Math.PI/2 - 0.05, phi - dy * 0.008));
+    }
+    updateCamera();
+  });
+  renderer.domElement.addEventListener("wheel", e => {
+    radius = Math.max(1, radius + e.deltaY * 0.01);
+    updateCamera();
+  });
+
+  // 렌더 루프
+  function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  // 리사이즈
+  window.addEventListener("resize", () => {
+    const W2 = panel.clientWidth, H2 = panel.clientHeight;
+    camera.aspect = W2/H2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(W2, H2);
+  });
 }
 
+// ── Three.js: 방 배치 렌더링 ────────────────────────────────────────────
+const ROOM_COLORS = {
+  "거실": 0x1a3a5c, "부엌": 0x1a3a2a, "안방": 0x2a1a3a,
+  "방2": 0x3a2a1a, "방3": 0x1a3a35, "공용욕실": 0x1a2a3a,
+  "안방욕실": 0x252a35, "현관": 0x2a2a2a, "드레스룸": 0x2a1a2a,
+};
+
+function renderRooms(panelId, phId, outlinePtsMm, rooms, key) {
+  renderOutline(panelId, phId, outlinePtsMm, key);
+  // 방 폴리곤은 추후 Three.js ShapeGeometry로 추가
+}
+
+// ── 자동 방 배치 (외곽 bounding box 기준 간단 분할) ───────────────────
+function autoLayoutRooms(ptsMm) {
+  const xs = ptsMm.map(p => p[0]), ys = ptsMm.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const W = maxX - minX, H = maxY - minY;
+  const mx = minX + W/2, my = minY + H/2;
+
+  function rect(x1,y1,x2,y2) {
+    return [[x1,y1],[x2,y1],[x2,y2],[x1,y2]];
+  }
+
+  return [
+    { name:"거실",     polygon_mm: rect(mx-W*0.35, minY+H*0.05, mx+W*0.2, my-H*0.1), has_window:true },
+    { name:"부엌",     polygon_mm: rect(mx+W*0.2,  minY+H*0.05, maxX-W*0.05, my-H*0.1), has_window:true },
+    { name:"안방",     polygon_mm: rect(mx-W*0.1,  my-H*0.1, maxX-W*0.05, my+H*0.3), has_window:true },
+    { name:"방2",      polygon_mm: rect(minX+W*0.05, my-H*0.1, mx-W*0.1, my+H*0.2), has_window:true },
+    { name:"방3",      polygon_mm: rect(minX+W*0.05, my+H*0.2, mx-W*0.1, maxY-H*0.05), has_window:true },
+    { name:"공용욕실", polygon_mm: rect(mx-W*0.35, my+H*0.3, mx,          maxY-H*0.05), has_window:false },
+  ];
+}
+
+// ── 유틸 ─────────────────────────────────────────────────────────────────
 function showStatus(msg, type) {
   const el = document.getElementById("status-msg");
-  el.textContent  = msg;
-  el.className    = type;
-  el.style.display = "block";
+  el.textContent    = msg;
+  el.className      = type;
+  el.style.display  = "block";
+}
+function showProgress(show) {
+  document.getElementById("progress-bar").style.display = show ? "block" : "none";
 }
 </script>
 </body>
