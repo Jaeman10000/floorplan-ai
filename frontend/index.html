@@ -377,7 +377,7 @@
 
 <script>
 // ── 설정 ──────────────────────────────────────────────────────────────────
-const API = "https://floorplan-ai-production-c244.up.railway.app";
+const API = "http://localhost:8000";
 let jobId  = null;
 let ptsMm  = null;
 let areaM2 = null;
@@ -438,9 +438,16 @@ async function handleFile(file) {
     ptsMm  = data.pts_mm;
     areaM2 = data.area_m2;
 
+    // pts_mm 검증 — 좌표가 없으면 실패 처리
+    if (!ptsMm || ptsMm.length < 3) {
+      showStatus("❌ 외곽 추출 실패: 도면에서 윤곽선을 찾지 못했습니다. 다른 이미지를 시도해보세요.", "error");
+      showProgress(false);
+      return;
+    }
+
     // 분석 결과 표시
     document.getElementById("info-area").textContent  = data.area_m2 ? `${data.area_m2.toFixed(1)}m²` : "—";
-    document.getElementById("info-pts").textContent   = `${(data.pts_mm||[]).length}개`;
+    document.getElementById("info-pts").textContent   = `${ptsMm.length}개`;
     document.getElementById("info-scale").textContent = data.scale_mm_per_px
       ? `${data.scale_mm_per_px.toFixed(2)} mm/px` : "—";
     document.getElementById("info-conf").textContent  = data.confidence
@@ -451,7 +458,7 @@ async function handleFile(file) {
     ["btn-asis","btn-redesign","btn-dxf"].forEach(id =>
       document.getElementById(id).disabled = false);
 
-    showStatus("✅ 도면 분석 완료. 3D 변환 버튼을 눌러보세요.", "ok");
+    showStatus(`✅ 도면 분석 완료 — 외곽 좌표 ${ptsMm.length}개 추출. 3D 변환 버튼을 눌러보세요.`, "ok");
     showProgress(false);
 
   } catch (err) {
