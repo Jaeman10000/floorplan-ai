@@ -448,21 +448,32 @@ def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=2
 
 def _configure_tesseract(pytesseract):
     """
-    Tesseract 실행 파일 경로 결정.
-    우선순위: TESSERACT_CMD 환경변수 > Windows 기본 설치 경로 > PATH(pytesseract 기본).
+    Tesseract 실행 파일 경로 + 언어 데이터(tessdata) 폴더 결정.
+
+    실행 파일 우선순위: TESSERACT_CMD 환경변수 > Windows 기본 설치 경로 > PATH.
+    tessdata: TESSDATA_PREFIX가 이미 있으면 그대로 두고, 없을 때만
+    사용자 로컬 tessdata(%LOCALAPPDATA%\\Tesseract-OCR\\tessdata, kor 포함)를
+    자동 지정한다. 이 폴더가 없는 환경(예: 집 PC)은 기본 설치 tessdata를 그대로 사용.
     """
     tess_cmd = os.environ.get("TESSERACT_CMD")
     if tess_cmd and os.path.exists(tess_cmd):
         pytesseract.pytesseract.tesseract_cmd = tess_cmd
-        return
-    for cand in (
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    ):
-        if os.path.exists(cand):
-            pytesseract.pytesseract.tesseract_cmd = cand
-            return
-    # 그 외엔 PATH 상의 tesseract 사용
+    else:
+        for cand in (
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ):
+            if os.path.exists(cand):
+                pytesseract.pytesseract.tesseract_cmd = cand
+                break
+        # 그 외엔 PATH 상의 tesseract 사용
+
+    # 한글 등 추가 언어팩이 담긴 사용자 로컬 tessdata 자동 연결
+    if not os.environ.get("TESSDATA_PREFIX"):
+        local = os.environ.get("LOCALAPPDATA", "")
+        user_tessdata = os.path.join(local, "Tesseract-OCR", "tessdata")
+        if local and os.path.isdir(user_tessdata):
+            os.environ["TESSDATA_PREFIX"] = user_tessdata
 
 
 def _ocr_dimension_tokens(gray, warnings):
