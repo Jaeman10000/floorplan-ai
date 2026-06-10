@@ -1,6 +1,5 @@
-fastapi==0.111.0
-uvicorn==0.29.0
-python-multipart==0.0.9
-shapely>=2.0.0
-pydantic==2.7.1
-setuptools
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+shapely==2.0.2
+pydantic==2.5.0
