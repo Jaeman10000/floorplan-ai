@@ -302,14 +302,11 @@ def _extract_with_opencv(
     if len(pts_px) <= 4:
         warnings.append(f"단순 다각형으로 인식됨 ({len(pts_px)}각형) — 복잡 외곽이면 입력 이미지 품질 확인 필요")
 
-    # 치수선 OCR — 도면 내 mm 숫자 인식
-    dimensions = _ocr_dimensions(gray, warnings)
+    # 치수선 OCR — 도면 내 mm 숫자를 위치 정보와 함께 인식
+    dim_tokens = _ocr_dimension_tokens(gray, warnings)
+    dimensions = sorted({t["value"] for t in dim_tokens}, reverse=True)
 
-    # 스케일 결정 — 우선순위: 명시 힌트 > 알려진 면적 > 치수선 OCR > 이미지 너비 추정
-    bbox_w = max(p[0] for p in pts_px) - min(p[0] for p in pts_px)
-    bbox_h = max(p[1] for p in pts_px) - min(p[1] for p in pts_px)
-    bbox_max_px = max(bbox_w, bbox_h, 1)
-
+    # 스케일 결정 — 우선순위: 명시 힌트 > 알려진 면적 > 치수선-변 매칭 > 이미지 너비 추정
     scale = None
     if scale_hint:
         scale = scale_hint
@@ -317,10 +314,9 @@ def _extract_with_opencv(
         area_px2 = _shoelace_area_px2(pts_px)
         if area_px2 > 0:
             scale = math.sqrt(known_area_m2 * 1e6 / area_px2)
-    elif dimensions:
-        # 가장 큰 치수값이 건물 전체 폭/높이에 대응한다고 가정
-        scale = max(dimensions) / bbox_max_px
-        warnings.append(f"치수선 OCR 기반 스케일 추정 (최대 {max(dimensions):.0f}mm / {bbox_max_px}px)")
+    elif dim_tokens:
+        # 치수 숫자를 외곽 변에 매칭해 중앙값 스케일 산출 (오인식에 강건)
+        scale = _resolve_scale_from_dimensions(pts_px, dim_tokens, warnings)
 
     if scale is None or scale <= 0:
         scale = 10000.0 / w
@@ -450,10 +446,30 @@ def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=2
     return best
 
 
-def _ocr_dimensions(gray, warnings):
+def _configure_tesseract(pytesseract):
     """
-    도면 이미지에서 치수선 숫자(mm)를 OCR로 읽는다.
-    pytesseract/Tesseract 미설치 시 빈 리스트 반환(파이프라인 비중단).
+    Tesseract 실행 파일 경로 결정.
+    우선순위: TESSERACT_CMD 환경변수 > Windows 기본 설치 경로 > PATH(pytesseract 기본).
+    """
+    tess_cmd = os.environ.get("TESSERACT_CMD")
+    if tess_cmd and os.path.exists(tess_cmd):
+        pytesseract.pytesseract.tesseract_cmd = tess_cmd
+        return
+    for cand in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ):
+        if os.path.exists(cand):
+            pytesseract.pytesseract.tesseract_cmd = cand
+            return
+    # 그 외엔 PATH 상의 tesseract 사용
+
+
+def _ocr_dimension_tokens(gray, warnings):
+    """
+    도면에서 치수 숫자를 '위치 정보와 함께' OCR.
+    반환: [{"value": float(mm), "cx": px, "cy": px, "conf": float}, ...]
+    좌표는 원본 gray 픽셀 기준. 미설치/실패 시 빈 리스트(파이프라인 비중단).
     """
     try:
         import pytesseract
@@ -461,42 +477,144 @@ def _ocr_dimensions(gray, warnings):
         warnings.append("pytesseract 미설치 — 치수선 OCR 건너뜀")
         return []
 
-    # Windows에서 Tesseract 실행 파일 경로가 환경변수로 지정된 경우 적용
-    tess_cmd = os.environ.get("TESSERACT_CMD")
-    if tess_cmd:
-        pytesseract.pytesseract.tesseract_cmd = tess_cmd
+    _configure_tesseract(pytesseract)
+
+    # 치수 숫자는 작아서 원본 해상도로는 인식률이 낮다 → 2배 확대 + Otsu 이진화로 가독성 향상
+    scale_up = 2
+    big = cv2.resize(gray, None, fx=scale_up, fy=scale_up, interpolation=cv2.INTER_CUBIC)
+    _, binimg = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     try:
-        # 숫자/일부 단위 문자만 허용해 오인식 감소
-        config = "--psm 11 -c tessedit_char_whitelist=0123456789"
+        # 콤마 포함 숫자(예: "3,300", "11,700")까지 허용해 한국 도면 표기 대응
+        config = "--psm 11 -c tessedit_char_whitelist=0123456789,"
         data = pytesseract.image_to_data(
-            gray, config=config, output_type=pytesseract.Output.DICT
+            binimg, config=config, output_type=pytesseract.Output.DICT
         )
     except Exception as e:
         warnings.append(f"Tesseract 실행 실패 — 치수선 OCR 건너뜀: {str(e)[:60]}")
         return []
 
-    dims = []
-    for token, conf in zip(data.get("text", []), data.get("conf", [])):
-        token = token.strip()
-        if not token.isdigit():
+    tokens = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        raw = (data["text"][i] or "").strip().replace(",", "")
+        if not raw.isdigit():
             continue
         try:
-            conf_val = float(conf)
+            conf_val = float(data["conf"][i])
         except (ValueError, TypeError):
             conf_val = -1.0
         if conf_val < 30:          # 저신뢰 인식 제거
             continue
-        value = int(token)
+        value = int(raw)
         # 건축 치수로 타당한 범위(mm): 100mm ~ 100m
-        if 100 <= value <= 100000:
-            dims.append(float(value))
+        if not (100 <= value <= 100000):
+            continue
+        # 확대 좌표 → 원본 px 좌표로 환산 (토큰 중심점)
+        cx = (data["left"][i] + data["width"][i] / 2.0) / scale_up
+        cy = (data["top"][i] + data["height"][i] / 2.0) / scale_up
+        tokens.append({"value": float(value), "cx": cx, "cy": cy, "conf": conf_val})
 
-    if not dims:
+    if not tokens:
         warnings.append("치수선 숫자를 인식하지 못함")
+    return tokens
 
-    # 중복 제거 + 내림차순(큰 치수가 전체 폭/높이일 확률 높음)
-    return sorted(set(dims), reverse=True)
+
+def _ocr_dimensions(gray, warnings):
+    """치수 숫자 값 목록(중복 제거, 내림차순). 값만 필요한 호출용 래퍼."""
+    tokens = _ocr_dimension_tokens(gray, warnings)
+    return sorted({t["value"] for t in tokens}, reverse=True)
+
+
+def _point_segment_dist(px, py, ax, ay, bx, by):
+    """점 (px,py)와 선분 (ax,ay)-(bx,by) 사이 거리 및 투영 매개변수 t(0~1) 반환."""
+    dx, dy = bx - ax, by - ay
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 0:
+        return math.hypot(px - ax, py - ay), 0.0
+    t = ((px - ax) * dx + (py - ay) * dy) / seg2
+    tc = max(0.0, min(1.0, t))
+    projx, projy = ax + tc * dx, ay + tc * dy
+    return math.hypot(px - projx, py - projy), tc
+
+
+def _resolve_scale_from_dimensions(pts_px, tokens, warnings):
+    """
+    치수 숫자를 외곽 변(edge)에 매칭해 mm/px 스케일을 추정한다.
+
+    각 치수값 ÷ 대응 변의 픽셀 길이 = 후보 스케일.
+    후보들을 '변 픽셀 길이로 가중한 합의 클러스터(consensus cluster)'로 묶어,
+    가장 많은 픽셀이 지지하는 스케일을 채택한다. 긴 변일수록 1px 오차의 영향이
+    작아 더 신뢰할 수 있으므로, 한두 개의 OCR 오인식(짧은 변에 흔함)을 자연히 배제한다.
+    (기존: 최대 치수 ÷ bbox 한 줄 추정 → 최대값이 틀리면 전체 좌표가 왜곡됨)
+    매칭 실패 시에만 최대 치수 ÷ bbox 폴백.
+    """
+    if not tokens or len(pts_px) < 2:
+        return None
+
+    # 외곽 변 목록 (시작점, 끝점, 길이)
+    n = len(pts_px)
+    edges = []
+    for i in range(n):
+        ax, ay = pts_px[i]
+        bx, by = pts_px[(i + 1) % n]
+        length = math.hypot(bx - ax, by - ay)
+        if length > 0:
+            edges.append((ax, ay, bx, by, length))
+    if not edges:
+        return None
+
+    xs = [p[0] for p in pts_px]
+    ys = [p[1] for p in pts_px]
+    bbox_w = max(xs) - min(xs)
+    bbox_h = max(ys) - min(ys)
+    diag = math.hypot(bbox_w, bbox_h)
+    max_match_dist = diag * 0.10   # 변에서 이 거리 이내의 라벨만 그 변에 속한다고 간주
+
+    # 후보 = (스케일, 가중치=변 픽셀 길이)
+    candidates = []
+    for tk in tokens:
+        best = None  # (거리, 변 길이)
+        for (ax, ay, bx, by, length) in edges:
+            d, proj_t = _point_segment_dist(tk["cx"], tk["cy"], ax, ay, bx, by)
+            # 치수 라벨은 변의 중앙부에 놓이므로 변 끝에 치우친 매칭은 배제
+            if proj_t < 0.15 or proj_t > 0.85:
+                continue
+            if best is None or d < best[0]:
+                best = (d, length)
+        if best and best[0] <= max_match_dist:
+            cand = tk["value"] / best[1]
+            if cand > 0:
+                candidates.append((cand, best[1]))
+
+    if candidates:
+        # 합의 클러스터: 각 후보를 기준으로 ±tol 이내 후보들의 가중치 합을 구해
+        # 가장 큰 지지를 받는 후보를 중심으로 클러스터를 형성한다.
+        tol = 0.15
+        best_center, best_support = None, -1.0
+        for c_i, _ in candidates:
+            support = sum(w for c_j, w in candidates
+                          if abs(c_j - c_i) / c_i <= tol)
+            if support > best_support:
+                best_support, best_center = support, c_i
+        cluster = [(c, w) for c, w in candidates
+                   if abs(c - best_center) / best_center <= tol]
+        tot_w = sum(w for _, w in cluster)
+        scale = sum(c * w for c, w in cluster) / tot_w   # 픽셀 길이 가중 평균
+        warnings.append(
+            f"치수선 {len(candidates)}개 매칭 / 합의 {len(cluster)}개 채택 "
+            f"— 스케일 {scale:.3f} mm/px"
+        )
+        return scale
+
+    # 폴백: 가장 큰 치수가 bbox 최대 축에 대응한다고 가정
+    bbox_max = max(bbox_w, bbox_h, 1)
+    max_val = max(tk["value"] for tk in tokens)
+    warnings.append(
+        f"치수선-변 매칭 실패 — 최대 치수 {max_val:.0f}mm / {bbox_max}px 로 추정"
+    )
+    return max_val / bbox_max
+
 
 def _shoelace_area_px2(pts):
     n = len(pts); area = 0.0
