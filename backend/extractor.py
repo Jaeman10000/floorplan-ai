@@ -466,6 +466,7 @@ def _ocr_dimension_tokens(gray, warnings):
     도면에서 치수 숫자를 '위치 정보와 함께' OCR.
     반환: [{"value": float(mm), "cx": px, "cy": px, "conf": float}, ...]
     좌표는 원본 gray 픽셀 기준. 미설치/실패 시 빈 리스트(파이프라인 비중단).
+    Railway 등 Tesseract 바이너리 미설치 환경에서는 자동으로 건너뜀.
     """
     try:
         import pytesseract
@@ -474,6 +475,13 @@ def _ocr_dimension_tokens(gray, warnings):
         return []
 
     _configure_tesseract(pytesseract)
+
+    # Tesseract 바이너리 존재 여부 사전 확인 — 없으면 즉시 반환 (Railway 등 클라우드 환경)
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception:
+        warnings.append("Tesseract 바이너리 없음 — 치수선 OCR 건너뜀 (Vision API로 처리)")
+        return []
 
     # 치수 숫자는 작아서 원본 해상도로는 인식률이 낮다 → 2배 확대 + Otsu 이진화로 가독성 향상
     scale_up = 2

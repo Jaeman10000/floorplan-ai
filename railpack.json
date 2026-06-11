@@ -1,6 +1,3 @@
 {
-  "$schema": "https://schema.railpack.com",
-  "deploy": {
-    "aptPackages": ["tesseract-ocr", "tesseract-ocr-kor"]
-  }
+  "$schema": "https://schema.railpack.com"
 }
