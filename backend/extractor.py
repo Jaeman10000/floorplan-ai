@@ -112,34 +112,40 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
     prompt = """이 건축 도면 이미지를 분석하여 아래 JSON 형식으로 정확하게 응답하세요.
 반드시 JSON만 반환하고 다른 텍스트는 포함하지 마세요.
 
-분석 규칙:
-1. 이미지 픽셀 좌표(px)로 폴리곤을 추출하세요 (좌상단이 0,0)
-2. 치수선의 숫자를 읽어 실제 mm 단위 스케일을 계산하세요
-3. 건물 전체 외곽, 각 세대(A/B/C), 공용부(계단/복도/엘리베이터)를 완전히 분리하세요
-4. 세대와 공용부는 절대 혼용하지 마세요
-5. 각 공간의 방 이름(거실, 침실, 욕실 등) 텍스트를 인식하세요
-6. 면적 숫자(m² 표기)를 읽어 area_m2에 입력하세요
+[핵심 원칙]
+픽셀 좌표가 아닌 도면의 치수선 숫자를 읽어서 실제 건축 mm 단위 좌표로 반환하라.
+전체 건물 외곽, 각 세대, 공용부 모두 치수선 기준 mm 좌표로 계산하라.
+좌상단을 (0,0) 기준으로 한다.
+절대로 픽셀 값을 반환하지 마라. 모든 좌표는 도면에 표기된 치수선 숫자(mm)를 합산한 건축 실치수여야 한다.
+
+분석 절차:
+1. 도면에 표기된 모든 치수선 숫자(mm 단위)를 먼저 읽어라. 예: 3300, 2700, 13000 등
+2. 도면 좌상단을 원점 (0, 0)으로 설정한다
+3. 치수선 숫자를 수평/수직 방향으로 누적 합산하여 각 꼭짓점의 절대 mm 좌표를 계산하라
+   예) 수평 치수 3300 + 2700 = 5000이면 x=0, x=3300, x=6000 순으로 꼭짓점 배치
+4. 건물 전체 외곽, 각 세대(A/B/C형 등), 공용부(계단실/복도/엘리베이터홀)를 분리하라
+5. 세대와 공용부는 절대 혼용하지 마라
+6. 각 공간의 방 이름(거실, 침실, 욕실, 주방 등) 텍스트를 인식하라
+7. 면적 숫자(m² 표기)를 읽어 area_m2에 입력하라
+8. 치수선이 없거나 불분명한 경우에만 도면 비율을 추정해 mm 좌표를 계산하라
 
 {
-  "scale_mm_per_px": 숫자,
-  "image_width_px": 숫자,
-  "image_height_px": 숫자,
-  "dimensions_found": [치수선에서 읽은 mm 숫자 배열],
-  "building_outline_px": [[x,y], ...],
+  "dimensions_found": [도면에서 읽은 치수선 숫자 배열 (mm 단위 정수)],
+  "building_outline_mm": [[x_mm, y_mm], ...],
   "units": [
     {
       "name": "A",
       "area_m2": 숫자,
-      "outline_px": [[x,y], ...],
+      "outline_mm": [[x_mm, y_mm], ...],
       "rooms": [
-        {"name": "거실", "center_px": [x,y], "polygon_px": [[x,y],...], "has_window": true/false}
+        {"name": "거실", "polygon_mm": [[x_mm, y_mm], ...], "has_window": true/false}
       ]
     }
   ],
   "common_areas": [
-    {"name": "계단실", "polygon_px": [[x,y], ...]},
-    {"name": "복도", "polygon_px": [[x,y], ...]},
-    {"name": "엘리베이터", "polygon_px": [[x,y], ...]}
+    {"name": "계단실", "polygon_mm": [[x_mm, y_mm], ...]},
+    {"name": "복도", "polygon_mm": [[x_mm, y_mm], ...]},
+    {"name": "엘리베이터홀", "polygon_mm": [[x_mm, y_mm], ...]}
   ],
   "confidence": 0.0~1.0,
   "warnings": []
@@ -190,27 +196,15 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
 
 
 def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
-    """Vision API JSON → ExtractionResult 변환"""
+    """Vision API JSON → ExtractionResult 변환 (치수선 기반 mm 좌표 직접 사용)"""
 
-    scale = float(data.get("scale_mm_per_px", 0))
-    if scale <= 0:
-        # 치수선 기반 스케일 재계산
-        dims = data.get("dimensions_found", [])
-        outline_px = data.get("building_outline_px", [])
-        if dims and outline_px:
-            xs = [p[0] for p in outline_px]
-            ys = [p[1] for p in outline_px]
-            bbox_max = max(max(xs)-min(xs), max(ys)-min(ys))
-            if bbox_max > 0:
-                scale = max(dims) / bbox_max
-        if scale <= 0:
-            scale = 10000.0 / data.get("image_width_px", 1000)
-            warnings.append("스케일 계산 실패 — 이미지 너비 기준 추정")
+    # 전체 건물 외곽 — mm 좌표 직접 읽기 (픽셀 변환 없음)
+    building_mm = data.get("building_outline_mm", [])
+    pts_mm = [(float(p[0]), float(p[1])) for p in building_mm]
+    pts_px = []  # mm 직접 모드에서는 px 좌표 불필요
 
-    # 전체 건물 외곽
-    building_px = data.get("building_outline_px", [])
-    pts_px = [(int(p[0]), int(p[1])) for p in building_px]
-    pts_mm = [(x * scale, y * scale) for x, y in pts_px]
+    # scale_mm_per_px는 mm 모드에서 1.0으로 고정 (호환성 유지)
+    scale = 1.0
 
     # 면적
     area_m2 = _shoelace_area_m2(pts_mm) if pts_mm else 0.0
@@ -218,18 +212,10 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
     # 세대별 정보
     units = []
     for u in data.get("units", []):
-        outline_px_u = u.get("outline_px", [])
-        outline_mm_u = [(p[0]*scale, p[1]*scale) for p in outline_px_u]
+        outline_mm_u = [(float(p[0]), float(p[1])) for p in u.get("outline_mm", [])]
         rooms = []
         for r in u.get("rooms", []):
-            poly_px = r.get("polygon_px", [])
-            poly_mm = [(p[0]*scale, p[1]*scale) for p in poly_px]
-            if not poly_mm and r.get("center_px"):
-                # 중심점만 있으면 임시 작은 폴리곤 생성
-                cx, cy = r["center_px"]
-                s = 1000  # 1m 임시
-                poly_mm = [(cx*scale-s, cy*scale-s), (cx*scale+s, cy*scale-s),
-                           (cx*scale+s, cy*scale+s), (cx*scale-s, cy*scale+s)]
+            poly_mm = [(float(p[0]), float(p[1])) for p in r.get("polygon_mm", [])]
             rooms.append(RoomInfo(
                 name=r.get("name", ""),
                 polygon_mm=poly_mm,
@@ -245,8 +231,7 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
     # 공용부
     common_areas = []
     for c in data.get("common_areas", []):
-        poly_px = c.get("polygon_px", [])
-        poly_mm = [(p[0]*scale, p[1]*scale) for p in poly_px]
+        poly_mm = [(float(p[0]), float(p[1])) for p in c.get("polygon_mm", [])]
         common_areas.append(CommonAreaInfo(
             name=c.get("name", ""),
             polygon_mm=poly_mm,
