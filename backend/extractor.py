@@ -1,6 +1,6 @@
 # extractor.py
 # 도면 이미지 → 구조화된 좌표 추출
-# Claude Vision API 기반 — 외곽/세대/공용부/치수/방이름 완전 분석
+# Claude Vision API: 치수선 숫자 읽기 → 변 길이 기반 좌표 계산
 
 import cv2
 import numpy as np
@@ -58,6 +58,62 @@ class ExtractionResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 변 목록 → 좌표 변환 (핵심 함수)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def edges_to_polygon(
+    edges: list,
+    origin: Tuple[float, float] = (0.0, 0.0),
+    close_tolerance_mm: float = 100.0,
+) -> List[Tuple[float, float]]:
+    """
+    변 목록(direction + length_mm) → 절대 mm 좌표 목록.
+
+    direction 규칙 (도면 좌표계: x→오른쪽, y↓아래):
+      "right"    : x += length_mm
+      "left"     : x -= length_mm
+      "down"     : y += length_mm
+      "up"       : y -= length_mm
+      "diagonal" : x += dx, y += dy  (dx/dy는 부호 포함 mm 실수)
+
+    마지막 점이 시작점과 close_tolerance_mm 이내이면 폐합점 제거.
+    """
+    if not edges:
+        return []
+
+    pts: List[Tuple[float, float]] = [origin]
+    x, y = float(origin[0]), float(origin[1])
+
+    for edge in edges:
+        direction = str(edge.get("direction", "")).lower().strip()
+        length = float(edge.get("length_mm", 0))
+
+        if direction == "right":
+            x += length
+        elif direction == "left":
+            x -= length
+        elif direction == "down":
+            y += length
+        elif direction == "up":
+            y -= length
+        elif direction == "diagonal":
+            x += float(edge.get("dx", 0))
+            y += float(edge.get("dy", 0))
+        else:
+            continue
+
+        pts.append((x, y))
+
+    # 폴리곤 닫힘 확인 — 중복 폐합점 제거
+    if len(pts) > 1:
+        dist = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+        if dist <= close_tolerance_mm:
+            pts = pts[:-1]
+
+    return pts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 메인 추출 함수
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -74,7 +130,6 @@ def extract_outline(
     """
     warnings = []
 
-    # 1. Claude Vision API 시도
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if api_key:
         try:
@@ -86,19 +141,75 @@ def extract_outline(
     else:
         warnings.append("ANTHROPIC_API_KEY 없음 — OpenCV fallback 사용")
 
-    # 2. OpenCV fallback
     return _extract_with_opencv(image_path, known_area_m2, scale_hint_mm_per_px,
                                  epsilon_ratio, min_area_ratio, warnings)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude Vision API 분석
+# Claude Vision API 분석 (치수선 기반)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optional[ExtractionResult]:
-    """Claude Vision API로 도면 완전 분석"""
+_VISION_PROMPT = """\
+이 건축 도면 이미지를 분석하여 아래 JSON 형식으로만 응답하라.
+JSON 외 다른 텍스트는 절대 포함하지 마라.
 
-    # 이미지 base64 인코딩
+━━━ 핵심 원칙 ━━━
+1. 픽셀 좌표 추정 절대 금지 — 도면에 인쇄된 치수선 숫자만 읽는다.
+2. 좌상단 꼭짓점에서 시계방향으로 각 변을 순서대로 열거한다.
+3. 각 변은 진행 방향(right/left/up/down/diagonal)과 치수선 mm 값으로 표현한다.
+4. 치수선이 없는 변: 인접한 전체 치수 − 나머지 부분 치수 합으로 계산해 채운다.
+   (예: 전체 가로 13000, 좌측 부분 5000 → 나머지 변 = 8000)
+5. 사선 변은 "diagonal"로 표기하고 dx, dy에 부호 포함 mm 값을 입력한다.
+
+━━━ 분석 절차 ━━━
+Step 1. 도면의 모든 치수선 숫자(mm)를 읽어 dimensions_found에 기록한다.
+Step 2. 건물 전체 외곽을 좌상단에서 시계방향으로 추적한다.
+        각 변: direction + length_mm (사선이면 추가로 dx, dy).
+Step 3. 각 세대(A형/B형 등)와 공용부(계단실/복도/엘리베이터홀)를 동일 방식으로 분석한다.
+        세대/공용부는 각자의 좌상단에서 시계방향으로 추적한다.
+Step 4. 방 이름 텍스트(거실·침실·욕실·주방 등)와 면적 숫자(m²)를 인식한다.
+Step 5. 추적 후 변 합계가 닫히지 않으면 마지막 변 길이를 자동 조정해 닫는다.
+
+━━━ 응답 형식 ━━━
+{
+  "building_edges": [
+    {"direction": "right", "length_mm": 13000},
+    {"direction": "down",  "length_mm": 8500},
+    {"direction": "diagonal", "length_mm": 3606, "dx": -2500, "dy": -2700},
+    ...
+  ],
+  "units": [
+    {
+      "name": "A",
+      "area_m2": 59.76,
+      "edges": [
+        {"direction": "right", "length_mm": 7000},
+        ...
+      ],
+      "rooms": [
+        {
+          "name": "거실",
+          "has_window": true,
+          "edges": [{"direction": "right", "length_mm": 3300}, ...]
+        }
+      ]
+    }
+  ],
+  "common_areas": [
+    {
+      "name": "계단실",
+      "edges": [{"direction": "right", "length_mm": 2400}, ...]
+    }
+  ],
+  "dimensions_found": [13000, 8500, 7000, 3300],
+  "confidence": 0.0~1.0,
+  "warnings": []
+}"""
+
+
+def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optional[ExtractionResult]:
+    """Claude Vision API로 도면 완전 분석 (치수선 기반 변 길이 방식)"""
+
     with open(image_path, "rb") as f:
         img_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
@@ -106,50 +217,8 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
     media_type = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".png": "image/png", ".gif": "image/gif",
-        ".webp": "image/webp"
+        ".webp": "image/webp",
     }.get(ext, "image/png")
-
-    prompt = """이 건축 도면 이미지를 분석하여 아래 JSON 형식으로 정확하게 응답하세요.
-반드시 JSON만 반환하고 다른 텍스트는 포함하지 마세요.
-
-[핵심 원칙]
-픽셀 좌표가 아닌 도면의 치수선 숫자를 읽어서 실제 건축 mm 단위 좌표로 반환하라.
-전체 건물 외곽, 각 세대, 공용부 모두 치수선 기준 mm 좌표로 계산하라.
-좌상단을 (0,0) 기준으로 한다.
-절대로 픽셀 값을 반환하지 마라. 모든 좌표는 도면에 표기된 치수선 숫자(mm)를 합산한 건축 실치수여야 한다.
-
-분석 절차:
-1. 도면에 표기된 모든 치수선 숫자(mm 단위)를 먼저 읽어라. 예: 3300, 2700, 13000 등
-2. 도면 좌상단을 원점 (0, 0)으로 설정한다
-3. 치수선 숫자를 수평/수직 방향으로 누적 합산하여 각 꼭짓점의 절대 mm 좌표를 계산하라
-   예) 수평 치수 3300 + 2700 = 5000이면 x=0, x=3300, x=6000 순으로 꼭짓점 배치
-4. 건물 전체 외곽, 각 세대(A/B/C형 등), 공용부(계단실/복도/엘리베이터홀)를 분리하라
-5. 세대와 공용부는 절대 혼용하지 마라
-6. 각 공간의 방 이름(거실, 침실, 욕실, 주방 등) 텍스트를 인식하라
-7. 면적 숫자(m² 표기)를 읽어 area_m2에 입력하라
-8. 치수선이 없거나 불분명한 경우에만 도면 비율을 추정해 mm 좌표를 계산하라
-
-{
-  "dimensions_found": [도면에서 읽은 치수선 숫자 배열 (mm 단위 정수)],
-  "building_outline_mm": [[x_mm, y_mm], ...],
-  "units": [
-    {
-      "name": "A",
-      "area_m2": 숫자,
-      "outline_mm": [[x_mm, y_mm], ...],
-      "rooms": [
-        {"name": "거실", "polygon_mm": [[x_mm, y_mm], ...], "has_window": true/false}
-      ]
-    }
-  ],
-  "common_areas": [
-    {"name": "계단실", "polygon_mm": [[x_mm, y_mm], ...]},
-    {"name": "복도", "polygon_mm": [[x_mm, y_mm], ...]},
-    {"name": "엘리베이터홀", "polygon_mm": [[x_mm, y_mm], ...]}
-  ],
-  "confidence": 0.0~1.0,
-  "warnings": []
-}"""
 
     response = httpx.post(
         "https://api.anthropic.com/v1/messages",
@@ -172,7 +241,7 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
                             "data": img_data,
                         },
                     },
-                    {"type": "text", "text": prompt}
+                    {"type": "text", "text": _VISION_PROMPT},
                 ],
             }],
         },
@@ -185,67 +254,64 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
     raw = response.json()
     text = raw["content"][0]["text"].strip()
 
-    # JSON 파싱
     json_match = re.search(r'\{.*\}', text, re.DOTALL)
     if not json_match:
         raise ValueError("Vision API 응답에서 JSON을 찾을 수 없음")
 
     data = json.loads(json_match.group())
-
     return _vision_data_to_result(data, warnings)
 
 
 def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
-    """Vision API JSON → ExtractionResult 변환 (치수선 기반 mm 좌표 직접 사용)"""
+    """Vision API JSON (edges 기반) → ExtractionResult"""
 
-    # 전체 건물 외곽 — mm 좌표 직접 읽기 (픽셀 변환 없음)
-    building_mm = data.get("building_outline_mm", [])
-    pts_mm = [(float(p[0]), float(p[1])) for p in building_mm]
-    pts_px = []  # mm 직접 모드에서는 px 좌표 불필요
+    # 건물 외곽: edges → 좌표
+    building_edges = data.get("building_edges", [])
+    pts_mm = edges_to_polygon(building_edges)
 
-    # scale_mm_per_px는 mm 모드에서 1.0으로 고정 (호환성 유지)
-    scale = 1.0
+    if not pts_mm:
+        warnings.append("building_edges가 비어있음 — 좌표 계산 불가")
 
-    # 면적
     area_m2 = _shoelace_area_m2(pts_mm) if pts_mm else 0.0
 
     # 세대별 정보
-    units = []
+    units: List[UnitInfo] = []
     for u in data.get("units", []):
-        outline_mm_u = [(float(p[0]), float(p[1])) for p in u.get("outline_mm", [])]
-        rooms = []
+        unit_edges = u.get("edges", [])
+        unit_outline = edges_to_polygon(unit_edges)
+        rooms: List[RoomInfo] = []
         for r in u.get("rooms", []):
-            poly_mm = [(float(p[0]), float(p[1])) for p in r.get("polygon_mm", [])]
+            room_poly = edges_to_polygon(r.get("edges", []))
             rooms.append(RoomInfo(
                 name=r.get("name", ""),
-                polygon_mm=poly_mm,
-                has_window=r.get("has_window", False),
+                polygon_mm=room_poly,
+                has_window=bool(r.get("has_window", False)),
             ))
         units.append(UnitInfo(
             name=u.get("name", ""),
-            outline_mm=outline_mm_u,
+            outline_mm=unit_outline,
             area_m2=float(u.get("area_m2", 0)),
             rooms=rooms,
         ))
 
     # 공용부
-    common_areas = []
+    common_areas: List[CommonAreaInfo] = []
     for c in data.get("common_areas", []):
-        poly_mm = [(float(p[0]), float(p[1])) for p in c.get("polygon_mm", [])]
+        poly = edges_to_polygon(c.get("edges", []))
         common_areas.append(CommonAreaInfo(
             name=c.get("name", ""),
-            polygon_mm=poly_mm,
+            polygon_mm=poly,
         ))
 
     warnings.extend(data.get("warnings", []))
 
     return ExtractionResult(
-        pts_px=pts_px,
+        pts_px=[],
         pts_mm=pts_mm,
-        scale_mm_per_px=scale,
+        scale_mm_per_px=1.0,
         area_m2=round(area_m2, 2),
         confidence=float(data.get("confidence", 0.8)),
-        ocr_dimensions=data.get("dimensions_found", []),
+        ocr_dimensions=[float(d) for d in data.get("dimensions_found", [])],
         warnings=warnings,
         units=units,
         common_areas=common_areas,
@@ -280,18 +346,14 @@ def _extract_with_opencv(
         warnings.append("외곽 후보 부족 — 가장 큰 윤곽 사용")
 
     main = max(valid, key=cv2.contourArea)
-
-    # 적응형 단순화 — 사각형으로 뭉개지 않고 오각형/L자형 오목 코너까지 보존
     approx = _simplify_contour(main, epsilon_ratio, area_tol=0.02, max_vertices=24)
     pts_px = [(int(p[0][0]), int(p[0][1])) for p in approx]
     if len(pts_px) <= 4:
-        warnings.append(f"단순 다각형으로 인식됨 ({len(pts_px)}각형) — 복잡 외곽이면 입력 이미지 품질 확인 필요")
+        warnings.append(f"단순 다각형으로 인식됨 ({len(pts_px)}각형)")
 
-    # 치수선 OCR — 도면 내 mm 숫자를 위치 정보와 함께 인식
     dim_tokens = _ocr_dimension_tokens(gray, warnings)
     dimensions = sorted({t["value"] for t in dim_tokens}, reverse=True)
 
-    # 스케일 결정 — 우선순위: 명시 힌트 > 알려진 면적 > 치수선-변 매칭 > 이미지 너비 추정
     scale = None
     if scale_hint:
         scale = scale_hint
@@ -300,7 +362,6 @@ def _extract_with_opencv(
         if area_px2 > 0:
             scale = math.sqrt(known_area_m2 * 1e6 / area_px2)
     elif dim_tokens:
-        # 치수 숫자를 외곽 변에 매칭해 중앙값 스케일 산출 (오인식에 강건)
         scale = _resolve_scale_from_dimensions(pts_px, dim_tokens, warnings)
 
     if scale is None or scale <= 0:
@@ -310,7 +371,6 @@ def _extract_with_opencv(
     pts_mm = [(x * scale, y * scale) for x, y in pts_px]
     area_m2 = _shoelace_area_m2(pts_mm)
 
-    # 신뢰도 — 치수선을 읽었으면 가산
     confidence = 0.4
     if dimensions:
         confidence = 0.6
@@ -371,7 +431,7 @@ def result_to_dict(result: ExtractionResult) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 유틸
+# OpenCV 유틸
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _preprocess(img):
@@ -387,11 +447,8 @@ def _preprocess(img):
 
 def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=24):
     """
-    윤곽을 다각형으로 단순화하되, 오각형/L자형 등 오목 코너를 보존한다.
-
-    고정 epsilon은 작은 노치(notch)를 가진 외곽을 사각형으로 뭉개버린다.
-    대신 '원본 윤곽 면적과 area_tol 이내로 일치하는 가장 단순한 다각형'을
-    epsilon 이진 탐색으로 찾아, 노이즈는 제거하고 실제 코너는 유지한다.
+    오각형/L자형 등 오목 코너를 보존하는 적응형 다각형 단순화.
+    이진 탐색으로 '원본 면적 오차 area_tol 이내를 만족하는 가장 단순한 다각형' 탐색.
     """
     peri = cv2.arcLength(contour, True)
     true_area = cv2.contourArea(contour)
@@ -399,28 +456,24 @@ def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=2
         return cv2.approxPolyDP(contour, epsilon_ratio * peri, True)
 
     def fits(eps):
-        """eps로 근사한 다각형이 면적 오차 허용 범위 안인가"""
         ap = cv2.approxPolyDP(contour, eps, True)
         if len(ap) < 3:
             return False, ap
         area = cv2.contourArea(ap)
         return abs(area - true_area) / true_area <= area_tol, ap
 
-    # eps 범위: 둘레의 0.05% ~ 5%
     lo, hi = peri * 0.0005, peri * 0.05
     best = cv2.approxPolyDP(contour, lo, True)
 
-    # 이진 탐색: 면적 오차를 만족하는 '가장 큰' eps(=가장 단순) 찾기
     for _ in range(24):
         mid = (lo + hi) / 2.0
         ok, ap = fits(mid)
         if ok:
-            best = ap          # 더 단순화해도 면적이 유지됨 → eps 키워봄
+            best = ap
             lo = mid
         else:
-            hi = mid           # 너무 뭉개짐 → eps 줄임
+            hi = mid
 
-    # 꼭짓점이 여전히 너무 많으면(노이즈 잔존) 단계적으로 더 단순화
     if len(best) > max_vertices:
         for k in (0.01, 0.02, 0.03):
             ap = cv2.approxPolyDP(contour, k * peri, True)
@@ -432,14 +485,6 @@ def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=2
 
 
 def _configure_tesseract(pytesseract):
-    """
-    Tesseract 실행 파일 경로 + 언어 데이터(tessdata) 폴더 결정.
-
-    실행 파일 우선순위: TESSERACT_CMD 환경변수 > Windows 기본 설치 경로 > PATH.
-    tessdata: TESSDATA_PREFIX가 이미 있으면 그대로 두고, 없을 때만
-    사용자 로컬 tessdata(%LOCALAPPDATA%\\Tesseract-OCR\\tessdata, kor 포함)를
-    자동 지정한다. 이 폴더가 없는 환경(예: 집 PC)은 기본 설치 tessdata를 그대로 사용.
-    """
     tess_cmd = os.environ.get("TESSERACT_CMD")
     if tess_cmd and os.path.exists(tess_cmd):
         pytesseract.pytesseract.tesseract_cmd = tess_cmd
@@ -451,9 +496,7 @@ def _configure_tesseract(pytesseract):
             if os.path.exists(cand):
                 pytesseract.pytesseract.tesseract_cmd = cand
                 break
-        # 그 외엔 PATH 상의 tesseract 사용
 
-    # 한글 등 추가 언어팩이 담긴 사용자 로컬 tessdata 자동 연결
     if not os.environ.get("TESSDATA_PREFIX"):
         local = os.environ.get("LOCALAPPDATA", "")
         user_tessdata = os.path.join(local, "Tesseract-OCR", "tessdata")
@@ -463,10 +506,9 @@ def _configure_tesseract(pytesseract):
 
 def _ocr_dimension_tokens(gray, warnings):
     """
-    도면에서 치수 숫자를 '위치 정보와 함께' OCR.
+    도면에서 치수 숫자를 위치 정보와 함께 OCR.
     반환: [{"value": float(mm), "cx": px, "cy": px, "conf": float}, ...]
-    좌표는 원본 gray 픽셀 기준. 미설치/실패 시 빈 리스트(파이프라인 비중단).
-    Railway 등 Tesseract 바이너리 미설치 환경에서는 자동으로 건너뜀.
+    미설치/바이너리 없음 시 빈 리스트 반환 (파이프라인 비중단).
     """
     try:
         import pytesseract
@@ -476,31 +518,27 @@ def _ocr_dimension_tokens(gray, warnings):
 
     _configure_tesseract(pytesseract)
 
-    # Tesseract 바이너리 존재 여부 사전 확인 — 없으면 즉시 반환 (Railway 등 클라우드 환경)
     try:
         pytesseract.get_tesseract_version()
     except Exception:
         warnings.append("Tesseract 바이너리 없음 — 치수선 OCR 건너뜀 (Vision API로 처리)")
         return []
 
-    # 치수 숫자는 작아서 원본 해상도로는 인식률이 낮다 → 2배 확대 + Otsu 이진화로 가독성 향상
     scale_up = 2
     big = cv2.resize(gray, None, fx=scale_up, fy=scale_up, interpolation=cv2.INTER_CUBIC)
     _, binimg = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     try:
-        # 콤마 포함 숫자(예: "3,300", "11,700")까지 허용해 한국 도면 표기 대응
         config = "--psm 11 -c tessedit_char_whitelist=0123456789,"
         data = pytesseract.image_to_data(
             binimg, config=config, output_type=pytesseract.Output.DICT
         )
     except Exception as e:
-        warnings.append(f"Tesseract 실행 실패 — 치수선 OCR 건너뜀: {str(e)[:60]}")
+        warnings.append(f"Tesseract 실행 실패: {str(e)[:60]}")
         return []
 
     tokens = []
-    n = len(data.get("text", []))
-    for i in range(n):
+    for i in range(len(data.get("text", []))):
         raw = (data["text"][i] or "").strip().replace(",", "")
         if not raw.isdigit():
             continue
@@ -508,13 +546,11 @@ def _ocr_dimension_tokens(gray, warnings):
             conf_val = float(data["conf"][i])
         except (ValueError, TypeError):
             conf_val = -1.0
-        if conf_val < 30:          # 저신뢰 인식 제거
+        if conf_val < 30:
             continue
         value = int(raw)
-        # 건축 치수로 타당한 범위(mm): 100mm ~ 100m
         if not (100 <= value <= 100000):
             continue
-        # 확대 좌표 → 원본 px 좌표로 환산 (토큰 중심점)
         cx = (data["left"][i] + data["width"][i] / 2.0) / scale_up
         cy = (data["top"][i] + data["height"][i] / 2.0) / scale_up
         tokens.append({"value": float(value), "cx": cx, "cy": cy, "conf": conf_val})
@@ -524,39 +560,21 @@ def _ocr_dimension_tokens(gray, warnings):
     return tokens
 
 
-def _ocr_dimensions(gray, warnings):
-    """치수 숫자 값 목록(중복 제거, 내림차순). 값만 필요한 호출용 래퍼."""
-    tokens = _ocr_dimension_tokens(gray, warnings)
-    return sorted({t["value"] for t in tokens}, reverse=True)
-
-
 def _point_segment_dist(px, py, ax, ay, bx, by):
-    """점 (px,py)와 선분 (ax,ay)-(bx,by) 사이 거리 및 투영 매개변수 t(0~1) 반환."""
     dx, dy = bx - ax, by - ay
     seg2 = dx * dx + dy * dy
     if seg2 <= 0:
         return math.hypot(px - ax, py - ay), 0.0
     t = ((px - ax) * dx + (py - ay) * dy) / seg2
     tc = max(0.0, min(1.0, t))
-    projx, projy = ax + tc * dx, ay + tc * dy
-    return math.hypot(px - projx, py - projy), tc
+    return math.hypot(px - (ax + tc * dx), py - (ay + tc * dy)), tc
 
 
 def _resolve_scale_from_dimensions(pts_px, tokens, warnings):
-    """
-    치수 숫자를 외곽 변(edge)에 매칭해 mm/px 스케일을 추정한다.
-
-    각 치수값 ÷ 대응 변의 픽셀 길이 = 후보 스케일.
-    후보들을 '변 픽셀 길이로 가중한 합의 클러스터(consensus cluster)'로 묶어,
-    가장 많은 픽셀이 지지하는 스케일을 채택한다. 긴 변일수록 1px 오차의 영향이
-    작아 더 신뢰할 수 있으므로, 한두 개의 OCR 오인식(짧은 변에 흔함)을 자연히 배제한다.
-    (기존: 최대 치수 ÷ bbox 한 줄 추정 → 최대값이 틀리면 전체 좌표가 왜곡됨)
-    매칭 실패 시에만 최대 치수 ÷ bbox 폴백.
-    """
+    """치수 숫자를 외곽 변에 매칭해 mm/px 스케일 추정 (합의 클러스터 방식)."""
     if not tokens or len(pts_px) < 2:
         return None
 
-    # 외곽 변 목록 (시작점, 끝점, 길이)
     n = len(pts_px)
     edges = []
     for i in range(n):
@@ -573,15 +591,13 @@ def _resolve_scale_from_dimensions(pts_px, tokens, warnings):
     bbox_w = max(xs) - min(xs)
     bbox_h = max(ys) - min(ys)
     diag = math.hypot(bbox_w, bbox_h)
-    max_match_dist = diag * 0.10   # 변에서 이 거리 이내의 라벨만 그 변에 속한다고 간주
+    max_match_dist = diag * 0.10
 
-    # 후보 = (스케일, 가중치=변 픽셀 길이)
     candidates = []
     for tk in tokens:
-        best = None  # (거리, 변 길이)
+        best = None
         for (ax, ay, bx, by, length) in edges:
             d, proj_t = _point_segment_dist(tk["cx"], tk["cy"], ax, ay, bx, by)
-            # 치수 라벨은 변의 중앙부에 놓이므로 변 끝에 치우친 매칭은 배제
             if proj_t < 0.15 or proj_t > 0.85:
                 continue
             if best is None or d < best[0]:
@@ -592,40 +608,36 @@ def _resolve_scale_from_dimensions(pts_px, tokens, warnings):
                 candidates.append((cand, best[1]))
 
     if candidates:
-        # 합의 클러스터: 각 후보를 기준으로 ±tol 이내 후보들의 가중치 합을 구해
-        # 가장 큰 지지를 받는 후보를 중심으로 클러스터를 형성한다.
         tol = 0.15
         best_center, best_support = None, -1.0
         for c_i, _ in candidates:
-            support = sum(w for c_j, w in candidates
-                          if abs(c_j - c_i) / c_i <= tol)
+            support = sum(w for c_j, w in candidates if abs(c_j - c_i) / c_i <= tol)
             if support > best_support:
                 best_support, best_center = support, c_i
         cluster = [(c, w) for c, w in candidates
                    if abs(c - best_center) / best_center <= tol]
         tot_w = sum(w for _, w in cluster)
-        scale = sum(c * w for c, w in cluster) / tot_w   # 픽셀 길이 가중 평균
+        scale = sum(c * w for c, w in cluster) / tot_w
         warnings.append(
-            f"치수선 {len(candidates)}개 매칭 / 합의 {len(cluster)}개 채택 "
-            f"— 스케일 {scale:.3f} mm/px"
+            f"치수선 {len(candidates)}개 매칭 / 합의 {len(cluster)}개 채택 — 스케일 {scale:.3f} mm/px"
         )
         return scale
 
-    # 폴백: 가장 큰 치수가 bbox 최대 축에 대응한다고 가정
     bbox_max = max(bbox_w, bbox_h, 1)
     max_val = max(tk["value"] for tk in tokens)
-    warnings.append(
-        f"치수선-변 매칭 실패 — 최대 치수 {max_val:.0f}mm / {bbox_max}px 로 추정"
-    )
+    warnings.append(f"치수선-변 매칭 실패 — 최대 치수 {max_val:.0f}mm / {bbox_max}px 추정")
     return max_val / bbox_max
 
 
 def _shoelace_area_px2(pts):
-    n = len(pts); area = 0.0
+    n = len(pts)
+    area = 0.0
     for i in range(n):
-        x1, y1 = pts[i]; x2, y2 = pts[(i+1)%n]
-        area += x1*y2 - x2*y1
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        area += x1 * y2 - x2 * y1
     return abs(area) / 2.0
+
 
 def _shoelace_area_m2(pts_mm):
     return _shoelace_area_px2(pts_mm) / 1e6
