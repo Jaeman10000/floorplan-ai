@@ -58,62 +58,61 @@ class ExtractionResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 변 목록 → 좌표 변환 (핵심 함수)
+# 4면 치수 합산 → 5꼭짓점 건물 외곽 계산 (코드가 모든 계산 담당)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def edges_to_polygon(
-    edges: list,
-    origin: Tuple[float, float] = (0.0, 0.0),
-    close_tolerance_mm: float = 100.0,
-) -> List[Tuple[float, float]]:
+def build_pentagon(
+    top_dims: list,
+    right_dims: list,
+    bottom_dims: list,
+    left_dims: list,
+) -> Tuple[List[Tuple[float, float]], dict]:
     """
-    변 목록(direction + length_mm) → 절대 mm 좌표 목록.
+    4면 치수 배열 → 건물 외곽 폴리곤 (최대 5꼭짓점).
 
-    direction 규칙 (도면 좌표계: x→오른쪽, y↓아래):
-      "right"    : x += length_mm
-      "left"     : x -= length_mm
-      "down"     : y += length_mm
-      "up"       : y -= length_mm
-      "diagonal" : x += dx, y += dy  (dx/dy는 부호 포함 mm 실수)
+    사선은 코드가 자동 계산:
+      diag_dx = sum(bottom) - sum(top)   → 음수 = 우하단이 좌측으로 잘린 사선
+      diag_dy = sum(left)   - sum(right) → 양수 = 우하단이 아래로 잘린 사선
 
-    마지막 점이 시작점과 close_tolerance_mm 이내이면 폐합점 제거.
+    꼭짓점:
+      P0 = (0,         0)           좌상단
+      P1 = (sum_top,   0)           우상단
+      P2 = (sum_top,   sum_right)   우측 하강 끝 (사선 시작)
+      P3 = (sum_bottom, sum_left)   사선 끝 (= P2 + diag)
+      P4 = (0,         sum_left)    좌하단
+
+    직사각형(diag_dx=0, diag_dy=0)이면 P2==P3이므로 4꼭짓점으로 자동 축소.
+
+    반환: (pts_mm, stats)
+      stats: sum_top/right/bottom/left, diag_dx, diag_dy
     """
-    if not edges:
-        return []
+    sum_top    = sum(float(v) for v in top_dims)
+    sum_right  = sum(float(v) for v in right_dims)
+    sum_bottom = sum(float(v) for v in bottom_dims)
+    sum_left   = sum(float(v) for v in left_dims)
 
-    pts: List[Tuple[float, float]] = [origin]
-    x, y = float(origin[0]), float(origin[1])
+    diag_dx = sum_bottom - sum_top    # 음수 = 사선이 좌측으로 이동
+    diag_dy = sum_left   - sum_right  # 양수 = 사선이 아래로 이동
 
-    for edge in edges:
-        direction = str(edge.get("direction", "")).lower().strip()
-        length = float(edge.get("length_mm", 0))
+    P0 = (0.0,        0.0)
+    P1 = (sum_top,    0.0)
+    P2 = (sum_top,    sum_right)
+    P3 = (sum_top + diag_dx, sum_right + diag_dy)   # == (sum_bottom, sum_left)
+    P4 = (0.0,        sum_left)
 
-        if direction == "right":
-            x += length
-        elif direction == "left":
-            x -= length
-        elif direction == "down":
-            y += length
-        elif direction == "up":
-            y -= length
-        elif direction == "diagonal":
-            x += float(edge.get("dx", 0))
-            y += float(edge.get("dy", 0))
-        else:
-            continue
+    # 중복 꼭짓점 제거 (직사각형이면 P2==P3)
+    raw = [P0, P1, P2, P3, P4]
+    pts: List[Tuple[float, float]] = [raw[0]]
+    for p in raw[1:]:
+        if math.hypot(p[0] - pts[-1][0], p[1] - pts[-1][1]) > 1.0:
+            pts.append(p)
 
-        pts.append((x, y))
-
-    # 폴리곤 닫힘 처리
-    if len(pts) > 1:
-        dist = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
-        if dist <= close_tolerance_mm:
-            # 마지막 점이 시작점과 동일 → 중복 제거
-            pts = pts[:-1]
-        # dist > close_tolerance_mm: Vision이 폐합 변을 누락한 경우
-        # shoelace 공식은 암묵적으로 pts[-1]→pts[0]을 닫으므로 pts 그대로 사용
-
-    return pts
+    stats = {
+        "sum_top": sum_top, "sum_right": sum_right,
+        "sum_bottom": sum_bottom, "sum_left": sum_left,
+        "diag_dx": diag_dx, "diag_dy": diag_dy,
+    }
+    return pts, stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +130,7 @@ def extract_outline(
     도면 이미지를 분석하여 ExtractionResult 반환.
     Claude Vision API 사용 → 실패 시 OpenCV fallback.
     """
-    warnings = []
+    warnings: List[str] = []
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if api_key:
@@ -149,117 +148,50 @@ def extract_outline(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4면 치수 배열 → 건물 외곽 폴리곤 (핵심 계산 함수)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def dims_to_polygon(
-    top_dims: list,
-    right_dims: list,
-    bottom_dims: list,
-    left_dims: list,
-    diagonal: Optional[dict] = None,
-) -> Tuple[List[Tuple[float, float]], float]:
-    """
-    4면 치수 배열 + 선택적 사선 → 건물 외곽 폴리곤 좌표 계산.
-
-    top_dims   : 상단 치수, 왼→오른 순서 (x 증가 방향)
-    right_dims : 우측 치수, 위→아래 순서 (y 증가 방향)
-    bottom_dims: 하단 치수, 왼→오른 순서 (역순으로 적용해 오른→왼 이동)
-    left_dims  : 좌측 치수, 위→아래 순서 (역순으로 적용해 아래→위 이동)
-    diagonal   : {"dx": mm, "dy": mm} — 우측 하강 끝에서 적용 (dx<0=왼, dy>0=아래)
-
-    반환: (pts_mm, closure_error_mm)
-      closure_error_mm ≈ 0 : 치수 합산이 맞아 폴리곤이 완전히 닫힘
-      closure_error_mm > 0 : 치수 불일치 — 경고 필요
-    """
-    pts: List[Tuple[float, float]] = []
-    x, y = 0.0, 0.0
-
-    pts.append((x, y))                          # ① 좌상단 시작
-
-    for d in [float(v) for v in top_dims]:      # ② 상단: 왼→오른
-        x += d
-        pts.append((x, y))
-
-    for d in [float(v) for v in right_dims]:    # ③ 우측: 위→아래
-        y += d
-        pts.append((x, y))
-
-    if diagonal:                                 # ④ 사선 (선택)
-        x += float(diagonal.get("dx", 0))
-        y += float(diagonal.get("dy", 0))
-        pts.append((x, y))
-
-    for d in [float(v) for v in reversed(bottom_dims)]:  # ⑤ 하단: 오른→왼
-        x -= d
-        pts.append((x, y))
-
-    for d in [float(v) for v in reversed(left_dims)]:    # ⑥ 좌측: 아래→위
-        y -= d
-        pts.append((x, y))
-
-    closure_err = math.hypot(x, y)              # 마지막 점과 원점(0,0) 거리
-
-    # 마지막 점이 시작점과 일치하면 중복 제거
-    if len(pts) > 1 and closure_err <= 100:
-        pts = pts[:-1]
-
-    return pts, closure_err
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Claude Vision API 분석 (4면 치수 기반)
+# Claude Vision API — 숫자 읽기 전담 (계산 없음)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _VISION_PROMPT = """\
-이 건축 도면 이미지를 분석하여 아래 JSON 형식으로만 응답하라.
+이 건축 도면 이미지에서 치수선 숫자를 읽어 JSON으로만 반환하라.
 JSON 외 다른 텍스트는 절대 포함하지 마라.
+계산, 조합, 검증을 하지 말 것. 도면에 보이는 숫자만 나열하라.
 
-━━━ 핵심 원칙 ━━━
-1. 선을 추적하거나 픽셀 좌표를 추정하지 말 것.
-2. 도면에 인쇄된 치수선 숫자만 읽는다.
-3. 건물 외벽에 직접 붙은 치수선만 읽는다.
-4. 대지 경계선 치수와 건물 치수를 혼동하지 말 것.
+[읽어야 할 항목]
+• top_dims    : 건물 상단 외벽에 붙은 치수 숫자, 왼→오른 순서, mm 정수
+• right_dims  : 건물 우측 외벽에 붙은 치수 숫자, 위→아래 순서, mm 정수
+• bottom_dims : 건물 하단 외벽에 붙은 치수 숫자, 왼→오른 순서, mm 정수
+• left_dims   : 건물 좌측 외벽에 붙은 치수 숫자, 위→아래 순서, mm 정수
+• units       : 세대 이름, 면적(m²), 방 이름 목록
+• common_areas: 공용부 이름 목록 (계단실, 엘리베이터홀, 복도 등)
+• common_area_m2: 공용부 면적 합계 (도면에 표기된 경우, 없으면 0)
 
-━━━ 건물 치수선 vs 대지 경계선 구분 ━━━
-• 건물 치수선: 굵은 외벽선 바로 바깥에 붙어있고, 방 이름(거실·침실)이 그 안에 있다.
-• 대지 경계선: 도면 종이 테두리에 가까운 가장 바깥쪽 얇은 선. 이 치수는 무시한다.
+[주의 사항]
+1. 건물 외벽에 직접 붙은 치수선만 읽는다. 대지 경계선·도면 테두리의 치수는 무시한다.
+2. 사선 벽이 있어도 사선 길이는 읽지 않는다. 4면(상/우/하/좌) 치수만 읽는다.
+3. 59.76, 65.21 같은 소수점 방 면적은 치수 배열에 절대 넣지 않는다.
+4. 세대(units): 거실·침실이 있고 면적 30m² 이상인 주거 단위만 포함.
+5. 18m² 이하 공간은 절대 units에 포함하지 않는다.
 
-━━━ 4면 치수 읽기 규칙 ━━━
-• top_dims   : 건물 상단(북측) 외벽에 붙은 치수선 숫자, 왼쪽→오른쪽 순서
-• right_dims : 건물 우측(동측) 외벽에 붙은 치수선 숫자, 위→아래 순서
-• bottom_dims: 건물 하단(남측) 수평 외벽에 붙은 치수선 숫자, 왼쪽→오른쪽 순서
-               사선이 있으면 사선이 끝나는 지점부터의 수평 구간만 포함
-• left_dims  : 건물 좌측(서측) 외벽에 붙은 치수선 숫자, 위→아래 순서
-• diagonal   : 사선 외벽이 있으면 수평 이동량(dx, 왼=음수)과 수직 이동량(dy, 아래=양수)
-
-━━━ 세대 분류 규칙 ━━━
-• 세대(units): 방 이름(거실·침실·욕실·주방)이 있고 면적이 30㎡ 이상인 주거 단위
-• 공용부: 계단실·엘리베이터홀·복도·기계실 및 면적 30㎡ 미만 공간
-• 18㎡ 이하 공간은 절대 세대(units)에 포함하지 말 것
-
-━━━ 응답 형식 ━━━
+[응답 형식]
 {
-  "top_dims":    [치수 숫자 배열, 왼→오른, mm 정수],
-  "right_dims":  [치수 숫자 배열, 위→아래, mm 정수],
-  "bottom_dims": [치수 숫자 배열, 왼→오른, mm 정수],
-  "left_dims":   [치수 숫자 배열, 위→아래, mm 정수],
-  "diagonal":    {"dx": 수평mm(왼=음수), "dy": 수직mm(아래=양수)},
+  "top_dims":     [3000, 3300, 3300, 3400],
+  "right_dims":   [2600, 2600, 3300, 3400, 2700, 1800, 2900],
+  "bottom_dims":  [3900, 3300, 2400, 3400],
+  "left_dims":    [1300, 2700, 2700, 5200, 2700, 3300, 1400],
   "units": [
     {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
     {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "침실", "욕실", "주방"]},
     {"name": "C", "area_m2": 64.00, "rooms": ["거실", "침실", "침실", "욕실", "주방", "발코니"]}
   ],
   "common_areas": ["계단실", "엘리베이터홀"],
+  "common_area_m2": 18.41,
   "confidence": 0.0~1.0,
   "warnings": []
-}
-
-주의: diagonal이 없으면 "diagonal": null 로 반환하라."""
+}"""
 
 
 def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optional[ExtractionResult]:
-    """Claude Vision API로 도면 분석 (4면 치수 기반)"""
+    """Claude Vision API 호출 — 치수 숫자 읽기 전담"""
 
     with open(image_path, "rb") as f:
         img_data = base64.standard_b64encode(f.read()).decode("utf-8")
@@ -286,11 +218,7 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
                 "content": [
                     {
                         "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": img_data,
-                        },
+                        "source": {"type": "base64", "media_type": media_type, "data": img_data},
                     },
                     {"type": "text", "text": _VISION_PROMPT},
                 ],
@@ -302,9 +230,7 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
     if response.status_code != 200:
         raise ValueError(f"Vision API 오류: {response.status_code} {response.text[:200]}")
 
-    raw = response.json()
-    text = raw["content"][0]["text"].strip()
-
+    text = response.json()["content"][0]["text"].strip()
     json_match = re.search(r'\{.*\}', text, re.DOTALL)
     if not json_match:
         raise ValueError("Vision API 응답에서 JSON을 찾을 수 없음")
@@ -314,65 +240,54 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
 
 
 def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
-    """Vision API JSON (4면 치수 기반) → ExtractionResult"""
+    """Vision JSON (치수 숫자) → build_pentagon() 호출 → ExtractionResult"""
 
-    top_dims    = data.get("top_dims", [])
-    right_dims  = data.get("right_dims", [])
-    bottom_dims = data.get("bottom_dims", [])
-    left_dims   = data.get("left_dims", [])
-    diagonal    = data.get("diagonal") or None
+    top_dims    = [float(v) for v in data.get("top_dims",    [])]
+    right_dims  = [float(v) for v in data.get("right_dims",  [])]
+    bottom_dims = [float(v) for v in data.get("bottom_dims", [])]
+    left_dims   = [float(v) for v in data.get("left_dims",   [])]
 
-    # 치수 합산 검증 로그
-    top_sum    = sum(float(v) for v in top_dims)
-    right_sum  = sum(float(v) for v in right_dims)
-    bottom_sum = sum(float(v) for v in bottom_dims)
-    left_sum   = sum(float(v) for v in left_dims)
-    diag_dx    = float(diagonal.get("dx", 0)) if diagonal else 0.0
-    diag_dy    = float(diagonal.get("dy", 0)) if diagonal else 0.0
-
-    # 가로 균형: top = bottom + |diagonal_dx|
-    horiz_diff = abs(top_sum - (bottom_sum + abs(diag_dx)))
-    # 세로 균형: right + diagonal_dy = left  (diagonal_dy ≥ 0)
-    vert_diff  = abs((right_sum + diag_dy) - left_sum)
-
-    if horiz_diff > 50:
-        warnings.append(
-            f"가로 치수 불일치: 상단합 {top_sum:.0f} ≠ 하단합 {bottom_sum:.0f} + 사선dx {abs(diag_dx):.0f} "
-            f"(차이 {horiz_diff:.0f}mm)"
-        )
-    if vert_diff > 50:
-        warnings.append(
-            f"세로 치수 불일치: 우측합 {right_sum:.0f} + 사선dy {diag_dy:.0f} ≠ 좌측합 {left_sum:.0f} "
-            f"(차이 {vert_diff:.0f}mm)"
-        )
-
-    # 폴리곤 계산
-    if top_dims or left_dims:
-        pts_mm, closure_err = dims_to_polygon(
-            top_dims, right_dims, bottom_dims, left_dims, diagonal
-        )
-        if closure_err > 100:
-            warnings.append(f"폴리곤 미폐합 {closure_err:.0f}mm — 치수 합산 불일치")
-    else:
-        pts_mm = []
+    if not (top_dims and left_dims):
         warnings.append("치수 데이터 없음 — 좌표 계산 불가")
+        pts_mm, stats = [], {}
+    else:
+        pts_mm, stats = build_pentagon(top_dims, right_dims, bottom_dims, left_dims)
+
+        # 치수 불일치 경고 (정보 제공, 오류 아님)
+        dx, dy = stats["diag_dx"], stats["diag_dy"]
+        if abs(dx) > 50:
+            warnings.append(
+                f"가로 사선: 상단{stats['sum_top']:.0f} - 하단{stats['sum_bottom']:.0f}"
+                f" = {dx:.0f}mm (우하단 잘림)"
+            )
+        if abs(dy) > 50:
+            warnings.append(
+                f"세로 사선: 좌측{stats['sum_left']:.0f} - 우측{stats['sum_right']:.0f}"
+                f" = {dy:.0f}mm (우하단 잘림)"
+            )
 
     area_m2 = _shoelace_area_m2(pts_mm) if pts_mm else 0.0
 
-    # 세대 (outline_mm 없음 — 치수 기반 방식에서는 세대 외곽 별도 제공 안 함)
+    # 세대 — Vision은 이름/면적/방이름만 반환, outline은 코드가 계산 안 함
     units: List[UnitInfo] = []
     for u in data.get("units", []):
-        room_names = u.get("rooms", [])
+        area = float(u.get("area_m2", 0))
+        if area < 30:          # 30m² 미만은 세대 아님
+            warnings.append(f"세대 후보 {u.get('name','')} {area}m² 제외 (30m² 미만)")
+            continue
         rooms = [RoomInfo(name=str(r), polygon_mm=[], has_window=False)
-                 for r in room_names]
+                 for r in u.get("rooms", [])]
         units.append(UnitInfo(
             name=u.get("name", ""),
             outline_mm=[],
-            area_m2=float(u.get("area_m2", 0)),
+            area_m2=area,
             rooms=rooms,
         ))
 
-    # 공용부 (이름만)
+    if len(units) != 3:
+        warnings.append(f"세대 수 {len(units)}개 — 예상 3개(A/B/C)와 다름")
+
+    # 공용부
     common_areas: List[CommonAreaInfo] = [
         CommonAreaInfo(name=str(c), polygon_mm=[])
         for c in data.get("common_areas", [])
@@ -380,7 +295,7 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
 
     warnings.extend(data.get("warnings", []))
 
-    all_dims = [float(v) for v in top_dims + right_dims + bottom_dims + left_dims]
+    all_dims = top_dims + right_dims + bottom_dims + left_dims
 
     return ExtractionResult(
         pts_px=[],
