@@ -442,6 +442,7 @@ def result_to_dict(result: ExtractionResult) -> dict:
             }
             for c in result.common_areas
         ],
+        "raw_vision": result.raw_vision,
     }
 
 
