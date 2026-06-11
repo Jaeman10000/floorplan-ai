@@ -594,11 +594,14 @@ function renderOutline(panelId, phId, ptsMm, key) {
     Math.sqrt((p.x-cx)**2 + (p.z-cz)**2)));
 
   // 외곽 바닥 면 (반투명)
+  // Shape의 2D y축 = Three.js Z축이므로 rotation.x = π/2 로 XY→XZ 매핑
+  // Rx(π/2): local(x, shapeY, z) → world(x, -z, shapeY)
+  // → base(p.x, p.z, 0) → world(p.x, 0, p.z) ✓  (pts3 위치와 일치)
   const shape = new THREE.Shape(pts3.map(p => new THREE.Vector2(p.x, p.z)));
   const geo   = new THREE.ShapeGeometry(shape);
   const mat   = new THREE.MeshBasicMaterial({ color: 0x1a3a5c, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
   const mesh  = new THREE.Mesh(geo, mat);
-  mesh.rotation.x = -Math.PI / 2;
+  mesh.rotation.x = Math.PI / 2;
   scene.add(mesh);
 
   // 외곽 라인
@@ -608,12 +611,13 @@ function renderOutline(panelId, phId, ptsMm, key) {
   scene.add(new THREE.Line(lineGeo, lineMat));
 
   // 벽 압출 (2.8m)
+  // depth 음수: Rx(π/2)로 local +Z(압출방향) → world -Y 이므로 -wallH 로 world +Y(위) 방향
   const wallH = 2.8;
-  const extSettings = { depth: wallH, bevelEnabled: false };
+  const extSettings = { depth: -wallH, bevelEnabled: false };
   const wallGeo = new THREE.ExtrudeGeometry(shape, extSettings);
   const wallMat = new THREE.MeshLambertMaterial({ color: 0x2a2a35, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
   const wallMesh = new THREE.Mesh(wallGeo, wallMat);
-  wallMesh.rotation.x = -Math.PI / 2;
+  wallMesh.rotation.x = Math.PI / 2;
   scene.add(wallMesh);
 
   // 조명
