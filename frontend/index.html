@@ -582,17 +582,16 @@ function renderOutline(panelId, phId, ptsMm, key) {
   scene.background = new THREE.Color(0x0f0f13);
   const camera = new THREE.PerspectiveCamera(45, W/H, 0.1, 1000);
 
-  // pts_mm → Three.js 좌표 (m 단위, Y축 반전)
-  const maxY = Math.max(...ptsMm.map(p => p[1]));
-  const pts3  = ptsMm.map(p => new THREE.Vector3(p[0]/1000, 0, (maxY-p[1])/1000));
+  // pts_mm → Three.js 좌표 (m 단위, XZ 평면)
+  // 도면 X → Three.js X (좌→우),  도면 Y → Three.js Z (상→하)
+  // Y축 반전 없음: 도면 상단(Y=0) = 작은 Z(뒤쪽), 도면 하단 = 큰 Z(앞쪽)
+  const pts3 = ptsMm.map(p => new THREE.Vector3(p[0]/1000, 0, p[1]/1000));
 
   // 중심 계산
   const cx = pts3.reduce((s,p) => s+p.x, 0) / pts3.length;
   const cz = pts3.reduce((s,p) => s+p.z, 0) / pts3.length;
   const maxDist = Math.max(...pts3.map(p =>
     Math.sqrt((p.x-cx)**2 + (p.z-cz)**2)));
-  camera.position.set(cx, maxDist * 2.2, cz + maxDist * 2);
-  camera.lookAt(cx, 0, cz);
 
   // 외곽 바닥 면 (반투명)
   const shape = new THREE.Shape(pts3.map(p => new THREE.Vector2(p.x, p.z)));
@@ -631,7 +630,8 @@ function renderOutline(panelId, phId, ptsMm, key) {
   // 마우스 컨트롤 (간단 오빗)
   let isDragging = false, isRightDrag = false;
   let prevMouse  = {x:0, y:0};
-  let theta = 0.5, phi = 0.8, radius = maxDist * 3;
+  // theta=0: 도면 하단(+Z) 쪽 정면. phi=π/4: 45도 내려다보기.
+  let theta = 0, phi = Math.PI / 4, radius = maxDist * 3;
   let panX = cx, panZ = cz;
 
   function updateCamera() {
