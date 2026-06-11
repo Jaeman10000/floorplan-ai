@@ -149,7 +149,66 @@ def extract_outline(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude Vision API 분석 (치수선 기반)
+# 4면 치수 배열 → 건물 외곽 폴리곤 (핵심 계산 함수)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def dims_to_polygon(
+    top_dims: list,
+    right_dims: list,
+    bottom_dims: list,
+    left_dims: list,
+    diagonal: Optional[dict] = None,
+) -> Tuple[List[Tuple[float, float]], float]:
+    """
+    4면 치수 배열 + 선택적 사선 → 건물 외곽 폴리곤 좌표 계산.
+
+    top_dims   : 상단 치수, 왼→오른 순서 (x 증가 방향)
+    right_dims : 우측 치수, 위→아래 순서 (y 증가 방향)
+    bottom_dims: 하단 치수, 왼→오른 순서 (역순으로 적용해 오른→왼 이동)
+    left_dims  : 좌측 치수, 위→아래 순서 (역순으로 적용해 아래→위 이동)
+    diagonal   : {"dx": mm, "dy": mm} — 우측 하강 끝에서 적용 (dx<0=왼, dy>0=아래)
+
+    반환: (pts_mm, closure_error_mm)
+      closure_error_mm ≈ 0 : 치수 합산이 맞아 폴리곤이 완전히 닫힘
+      closure_error_mm > 0 : 치수 불일치 — 경고 필요
+    """
+    pts: List[Tuple[float, float]] = []
+    x, y = 0.0, 0.0
+
+    pts.append((x, y))                          # ① 좌상단 시작
+
+    for d in [float(v) for v in top_dims]:      # ② 상단: 왼→오른
+        x += d
+        pts.append((x, y))
+
+    for d in [float(v) for v in right_dims]:    # ③ 우측: 위→아래
+        y += d
+        pts.append((x, y))
+
+    if diagonal:                                 # ④ 사선 (선택)
+        x += float(diagonal.get("dx", 0))
+        y += float(diagonal.get("dy", 0))
+        pts.append((x, y))
+
+    for d in [float(v) for v in reversed(bottom_dims)]:  # ⑤ 하단: 오른→왼
+        x -= d
+        pts.append((x, y))
+
+    for d in [float(v) for v in reversed(left_dims)]:    # ⑥ 좌측: 아래→위
+        y -= d
+        pts.append((x, y))
+
+    closure_err = math.hypot(x, y)              # 마지막 점과 원점(0,0) 거리
+
+    # 마지막 점이 시작점과 일치하면 중복 제거
+    if len(pts) > 1 and closure_err <= 100:
+        pts = pts[:-1]
+
+    return pts, closure_err
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Claude Vision API 분석 (4면 치수 기반)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _VISION_PROMPT = """\
@@ -157,81 +216,50 @@ _VISION_PROMPT = """\
 JSON 외 다른 텍스트는 절대 포함하지 마라.
 
 ━━━ 핵심 원칙 ━━━
-1. 픽셀 좌표 추정 절대 금지 — 도면에 인쇄된 치수선 숫자만 읽는다.
-2. 좌상단 꼭짓점에서 시계방향으로 각 변을 순서대로 열거한다.
-3. 각 변은 진행 방향(right/left/up/down/diagonal)과 치수선 mm 값으로 표현한다.
-4. 치수선이 없는 변: 인접한 전체 치수 − 나머지 부분 치수 합으로 계산해 채운다.
-   (예: 전체 가로 13000, 좌측 부분 5000 → 나머지 변 = 8000)
-5. 사선 변은 "diagonal"로 표기하고 dx, dy에 부호 포함 mm 값을 입력한다.
+1. 선을 추적하거나 픽셀 좌표를 추정하지 말 것.
+2. 도면에 인쇄된 치수선 숫자만 읽는다.
+3. 건물 외벽에 직접 붙은 치수선만 읽는다.
+4. 대지 경계선 치수와 건물 치수를 혼동하지 말 것.
 
-━━━ 건물 외곽 식별 규칙 (대지 경계선과 혼동 금지) ━━━
-■ 건물 외곽(building_edges)이란:
-  - 도면 안쪽에 그려진 굵은 벽체선(외벽)을 따라가는 폐합 다각형이다.
-  - 실내 방들이 이 선 안에 배치되어 있고, 벽 두께가 표현된 이중선이 특징이다.
+━━━ 건물 치수선 vs 대지 경계선 구분 ━━━
+• 건물 치수선: 굵은 외벽선 바로 바깥에 붙어있고, 방 이름(거실·침실)이 그 안에 있다.
+• 대지 경계선: 도면 종이 테두리에 가까운 가장 바깥쪽 얇은 선. 이 치수는 무시한다.
 
-■ 대지 경계선(절대 포함 금지):
-  - 도면 가장 바깥쪽에 그려진 얇은 경계선으로, 도면지(종이) 테두리에 가깝다.
-  - 이 선 바깥에 치수선 숫자와 화살표가 배치되어 있다.
-  - 대지 경계선의 치수(부지 전체 크기)를 건물 외곽으로 착각하지 말 것.
+━━━ 4면 치수 읽기 규칙 ━━━
+• top_dims   : 건물 상단(북측) 외벽에 붙은 치수선 숫자, 왼쪽→오른쪽 순서
+• right_dims : 건물 우측(동측) 외벽에 붙은 치수선 숫자, 위→아래 순서
+• bottom_dims: 건물 하단(남측) 수평 외벽에 붙은 치수선 숫자, 왼쪽→오른쪽 순서
+               사선이 있으면 사선이 끝나는 지점부터의 수평 구간만 포함
+• left_dims  : 건물 좌측(서측) 외벽에 붙은 치수선 숫자, 위→아래 순서
+• diagonal   : 사선 외벽이 있으면 수평 이동량(dx, 왼=음수)과 수직 이동량(dy, 아래=양수)
 
-■ 구분법:
-  1. 굵기: 건물 외벽선은 굵다. 대지 경계선·치수선은 얇다.
-  2. 위치: 건물 외곽은 도면 내부, 대지 경계선은 도면 최외곽이다.
-  3. 내용: 건물 외곽 안에는 방 이름(거실·침실 등)이 적혀 있다.
-  4. 치수 연결: 건물 외곽에 직접 붙은 치수선 숫자를 읽는다.
-              도면 가장자리에만 있고 건물 벽과 연결되지 않은 치수는 대지 치수이므로 무시한다.
-
-━━━ 분석 절차 ━━━
-Step 1. 도면의 모든 치수선 숫자(mm)를 읽어 dimensions_found에 기록한다.
-Step 2. 굵은 외벽선으로 이루어진 건물 외곽을 좌상단에서 시계방향으로 추적한다.
-        각 변: direction + length_mm (사선이면 추가로 dx, dy).
-        ※ 대지 경계선·도면 테두리를 따라가지 말 것.
-Step 3. 각 세대(A형/B형 등)와 공용부(계단실/복도/엘리베이터홀)를 동일 방식으로 분석한다.
-        세대/공용부는 각자의 좌상단에서 시계방향으로 추적한다.
-Step 4. 방 이름 텍스트(거실·침실·욕실·주방 등)와 면적 숫자(m²)를 인식한다.
-Step 5. 추적 완료 후 폐합 검증: 모든 dx 합산=0, 모든 dy 합산=0 이어야 한다.
-        닫히지 않으면 누락된 마지막 변을 계산해 반드시 추가한다.
-        예) 우측 하강 합계 17500, 좌측 상승 합계 16600 → 마지막 "up 900" 추가.
+━━━ 세대 분류 규칙 ━━━
+• 세대(units): 방 이름(거실·침실·욕실·주방)이 있고 면적이 30㎡ 이상인 주거 단위
+• 공용부: 계단실·엘리베이터홀·복도·기계실 및 면적 30㎡ 미만 공간
+• 18㎡ 이하 공간은 절대 세대(units)에 포함하지 말 것
 
 ━━━ 응답 형식 ━━━
 {
-  "building_edges": [
-    {"direction": "right", "length_mm": 13000},
-    {"direction": "down",  "length_mm": 8500},
-    {"direction": "diagonal", "length_mm": 3606, "dx": -2500, "dy": -2700},
-    ...
-  ],
+  "top_dims":    [치수 숫자 배열, 왼→오른, mm 정수],
+  "right_dims":  [치수 숫자 배열, 위→아래, mm 정수],
+  "bottom_dims": [치수 숫자 배열, 왼→오른, mm 정수],
+  "left_dims":   [치수 숫자 배열, 위→아래, mm 정수],
+  "diagonal":    {"dx": 수평mm(왼=음수), "dy": 수직mm(아래=양수)},
   "units": [
-    {
-      "name": "A",
-      "area_m2": 59.76,
-      "edges": [
-        {"direction": "right", "length_mm": 7000},
-        ...
-      ],
-      "rooms": [
-        {
-          "name": "거실",
-          "has_window": true,
-          "edges": [{"direction": "right", "length_mm": 3300}, ...]
-        }
-      ]
-    }
+    {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
+    {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "침실", "욕실", "주방"]},
+    {"name": "C", "area_m2": 64.00, "rooms": ["거실", "침실", "침실", "욕실", "주방", "발코니"]}
   ],
-  "common_areas": [
-    {
-      "name": "계단실",
-      "edges": [{"direction": "right", "length_mm": 2400}, ...]
-    }
-  ],
-  "dimensions_found": [13000, 8500, 7000, 3300],
+  "common_areas": ["계단실", "엘리베이터홀"],
   "confidence": 0.0~1.0,
   "warnings": []
-}"""
+}
+
+주의: diagonal이 없으면 "diagonal": null 로 반환하라."""
 
 
 def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optional[ExtractionResult]:
-    """Claude Vision API로 도면 완전 분석 (치수선 기반 변 길이 방식)"""
+    """Claude Vision API로 도면 분석 (4면 치수 기반)"""
 
     with open(image_path, "rb") as f:
         img_data = base64.standard_b64encode(f.read()).decode("utf-8")
@@ -286,47 +314,73 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
 
 
 def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
-    """Vision API JSON (edges 기반) → ExtractionResult"""
+    """Vision API JSON (4면 치수 기반) → ExtractionResult"""
 
-    # 건물 외곽: edges → 좌표
-    building_edges = data.get("building_edges", [])
-    pts_mm = edges_to_polygon(building_edges)
+    top_dims    = data.get("top_dims", [])
+    right_dims  = data.get("right_dims", [])
+    bottom_dims = data.get("bottom_dims", [])
+    left_dims   = data.get("left_dims", [])
+    diagonal    = data.get("diagonal") or None
 
-    if not pts_mm:
-        warnings.append("building_edges가 비어있음 — 좌표 계산 불가")
+    # 치수 합산 검증 로그
+    top_sum    = sum(float(v) for v in top_dims)
+    right_sum  = sum(float(v) for v in right_dims)
+    bottom_sum = sum(float(v) for v in bottom_dims)
+    left_sum   = sum(float(v) for v in left_dims)
+    diag_dx    = float(diagonal.get("dx", 0)) if diagonal else 0.0
+    diag_dy    = float(diagonal.get("dy", 0)) if diagonal else 0.0
+
+    # 가로 균형: top = bottom + |diagonal_dx|
+    horiz_diff = abs(top_sum - (bottom_sum + abs(diag_dx)))
+    # 세로 균형: right + diagonal_dy = left  (diagonal_dy ≥ 0)
+    vert_diff  = abs((right_sum + diag_dy) - left_sum)
+
+    if horiz_diff > 50:
+        warnings.append(
+            f"가로 치수 불일치: 상단합 {top_sum:.0f} ≠ 하단합 {bottom_sum:.0f} + 사선dx {abs(diag_dx):.0f} "
+            f"(차이 {horiz_diff:.0f}mm)"
+        )
+    if vert_diff > 50:
+        warnings.append(
+            f"세로 치수 불일치: 우측합 {right_sum:.0f} + 사선dy {diag_dy:.0f} ≠ 좌측합 {left_sum:.0f} "
+            f"(차이 {vert_diff:.0f}mm)"
+        )
+
+    # 폴리곤 계산
+    if top_dims or left_dims:
+        pts_mm, closure_err = dims_to_polygon(
+            top_dims, right_dims, bottom_dims, left_dims, diagonal
+        )
+        if closure_err > 100:
+            warnings.append(f"폴리곤 미폐합 {closure_err:.0f}mm — 치수 합산 불일치")
+    else:
+        pts_mm = []
+        warnings.append("치수 데이터 없음 — 좌표 계산 불가")
 
     area_m2 = _shoelace_area_m2(pts_mm) if pts_mm else 0.0
 
-    # 세대별 정보
+    # 세대 (outline_mm 없음 — 치수 기반 방식에서는 세대 외곽 별도 제공 안 함)
     units: List[UnitInfo] = []
     for u in data.get("units", []):
-        unit_edges = u.get("edges", [])
-        unit_outline = edges_to_polygon(unit_edges)
-        rooms: List[RoomInfo] = []
-        for r in u.get("rooms", []):
-            room_poly = edges_to_polygon(r.get("edges", []))
-            rooms.append(RoomInfo(
-                name=r.get("name", ""),
-                polygon_mm=room_poly,
-                has_window=bool(r.get("has_window", False)),
-            ))
+        room_names = u.get("rooms", [])
+        rooms = [RoomInfo(name=str(r), polygon_mm=[], has_window=False)
+                 for r in room_names]
         units.append(UnitInfo(
             name=u.get("name", ""),
-            outline_mm=unit_outline,
+            outline_mm=[],
             area_m2=float(u.get("area_m2", 0)),
             rooms=rooms,
         ))
 
-    # 공용부
-    common_areas: List[CommonAreaInfo] = []
-    for c in data.get("common_areas", []):
-        poly = edges_to_polygon(c.get("edges", []))
-        common_areas.append(CommonAreaInfo(
-            name=c.get("name", ""),
-            polygon_mm=poly,
-        ))
+    # 공용부 (이름만)
+    common_areas: List[CommonAreaInfo] = [
+        CommonAreaInfo(name=str(c), polygon_mm=[])
+        for c in data.get("common_areas", [])
+    ]
 
     warnings.extend(data.get("warnings", []))
+
+    all_dims = [float(v) for v in top_dims + right_dims + bottom_dims + left_dims]
 
     return ExtractionResult(
         pts_px=[],
@@ -334,7 +388,7 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
         scale_mm_per_px=1.0,
         area_m2=round(area_m2, 2),
         confidence=float(data.get("confidence", 0.8)),
-        ocr_dimensions=[float(d) for d in data.get("dimensions_found", [])],
+        ocr_dimensions=sorted(set(all_dims), reverse=True),
         warnings=warnings,
         units=units,
         common_areas=common_areas,
