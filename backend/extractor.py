@@ -67,6 +67,7 @@ def build_pentagon(
     has_diagonal: bool = False,
     diag_dx: float = 0.0,
     diag_dy: float = 0.0,
+    H_override: Optional[float] = None,
 ) -> Tuple[List[Tuple[float, float]], dict]:
     """
     상단·좌측 치수 합산 + 우하단 사선 크기 → 건물 외곽 폴리곤.
@@ -79,9 +80,10 @@ def build_pentagon(
 
     diag_dx: 사선의 가로 길이 (양수, 우→좌 방향)
     diag_dy: 사선의 세로 길이 (양수, 하→상 방향)
+    H_override: 세로 총 치수 보정값 (None이면 sum(left_dims) 사용)
     """
     W = sum(float(v) for v in top_dims)
-    H = sum(float(v) for v in left_dims)
+    H = H_override if H_override is not None else sum(float(v) for v in left_dims)
 
     if has_diagonal and (diag_dx > 0 or diag_dy > 0):
         pts = [
@@ -147,7 +149,8 @@ JSON 외 다른 텍스트는 절대 포함하지 마라.
 
 [읽어야 할 항목]
 • top_dims    : 건물 상단 외벽의 치수 숫자, 왼→오른 순서, mm 정수
-• left_dims   : 건물 좌측 외벽의 치수 숫자, 위→아래 순서, mm 정수
+• left_dims   : 건물 좌측 외벽의 치수 숫자, 위→아래 순서, mm 정수 (개별 구간 치수만, 전체 합계 치수는 제외)
+• building_height_mm: 건물 좌측 외벽 전체 높이를 나타내는 치수 (left_dims 구간들의 합계로 표시된 총 치수, mm 정수, 없으면 0)
 • has_diagonal: 건물 외곽에 사선 벽이 있으면 true, 직사각형이면 false
 • diagonal_horizontal_mm: 사선의 가로 길이 (has_diagonal=true일 때만, mm 정수)
 • diagonal_vertical_mm  : 사선의 세로 길이 (has_diagonal=true일 때만, mm 정수)
@@ -167,6 +170,7 @@ JSON 외 다른 텍스트는 절대 포함하지 마라.
 {
   "top_dims":  [3000, 3300, 3300, 3400],
   "left_dims": [1300, 2700, 2700, 5200, 2700, 3300, 1400],
+  "building_height_mm": 19300,
   "has_diagonal": true,
   "diagonal_horizontal_mm": 3400,
   "diagonal_vertical_mm":   2900,
@@ -242,10 +246,41 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
         pts_mm: List[Tuple[float, float]] = []
         stats: dict = {}
     else:
+        W = sum(top_dims)
+        H_raw = sum(left_dims)
+        H_override: Optional[float] = None
+
+        # ── left_dims 합계 범위 검증 ──────────────────────────────────────────
+        if W > 0:
+            ratio = H_raw / W
+            if ratio < 0.5:
+                warnings.append(
+                    f"left_dims 합 {H_raw:.0f}mm < 가로 {W:.0f}mm × 0.5 "
+                    f"({ratio:.2f}×) — 세로 치수 누락 의심"
+                )
+            elif ratio > 3.0:
+                warnings.append(
+                    f"left_dims 합 {H_raw:.0f}mm > 가로 {W:.0f}mm × 3 "
+                    f"({ratio:.2f}×) — 세로 치수 중복 의심"
+                )
+
+        # ── 전체 높이 치수로 자동 보정 ────────────────────────────────────────
+        bh = float(data.get("building_height_mm", 0))
+        if bh > 0:
+            diff = abs(H_raw - bh)
+            if diff > bh * 0.05:
+                warnings.append(
+                    f"left_dims 합 {H_raw:.0f}mm ≠ 전체 높이 {bh:.0f}mm "
+                    f"(차이 {diff:.0f}mm, {diff/bh*100:.1f}%) — 전체 높이로 자동 보정"
+                )
+                H_override = bh
+
         has_diag = bool(data.get("has_diagonal", False))
         diag_dx  = float(data.get("diagonal_horizontal_mm", 0))
         diag_dy  = float(data.get("diagonal_vertical_mm",   0))
-        pts_mm, stats = build_pentagon(top_dims, left_dims, has_diag, diag_dx, diag_dy)
+        pts_mm, stats = build_pentagon(
+            top_dims, left_dims, has_diag, diag_dx, diag_dy, H_override
+        )
 
         if has_diag:
             warnings.append(

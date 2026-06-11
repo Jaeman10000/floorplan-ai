@@ -16,6 +16,7 @@ Vision API  →  숫자 읽기만 (계산 금지)
 {
   "top_dims":  [3000, 3300, 3300, 3400],
   "left_dims": [1300, 2700, 2700, 5200, 2700, 3300, 1400],
+  "building_height_mm": 19300,
   "has_diagonal": true,
   "diagonal_horizontal_mm": 3400,
   "diagonal_vertical_mm":   2900,
@@ -31,11 +32,15 @@ Vision API  →  숫자 읽기만 (계산 금지)
 }
 ```
 
+- `left_dims`: 개별 구간 치수만 (전체 합계 치수선은 `building_height_mm`에 별도 기재)
+- `building_height_mm`: 도면의 전체 높이 총 치수 (없으면 0). `sum(left_dims)`와 비교해 자동 보정에 사용
+
 Vision API 프롬프트 규칙:
 1. 상단(top_dims)과 좌측(left_dims) 치수선만 읽는다
-2. 세대 이름, 면적, 방 이름만 읽는다
-3. 계산, 조합, 검증은 하지 않는다
-4. right_dims·bottom_dims는 반환하지 않는다
+2. left_dims에는 개별 구간만 — 전체 합계 치수는 building_height_mm에 넣는다
+3. 세대 이름, 면적, 방 이름만 읽는다
+4. 계산, 조합, 검증은 하지 않는다
+5. right_dims·bottom_dims는 반환하지 않는다
 
 ## 코드 처리 로직 — build_pentagon()
 
@@ -105,3 +110,4 @@ ANTHROPIC_API_KEY 없거나 Vision API 실패 시:
 | 2026.06.11 | Vision 역할 재설계 — 좌표 추정 → 치수 읽기만 |
 | 2026.06.11 | 4면 치수 → build_pentagon() 구조 확정 |
 | 2026.06.11 | top_dims+left_dims+has_diagonal 구조로 단순화 (right/bottom 제거) |
+| 2026.06.11 | building_height_mm 추가 — left_dims 합계 검증 + 자동 보정 로직 |
