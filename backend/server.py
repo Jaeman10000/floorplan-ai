@@ -6,6 +6,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from extractor import extract_outline, result_to_dict
 from dxf_builder import build_dxf_from_result, build_dxf, DXFBuildConfig
@@ -16,11 +17,19 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
+# 프론트엔드 정적 파일 서빙
+_FRONTEND = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if os.path.isdir(_FRONTEND):
+    app.mount("/static", StaticFiles(directory=_FRONTEND), name="static")
+
 TMPDIR = tempfile.gettempdir()
 
 
 @app.get("/")
 def health():
+    _index = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
+    if os.path.isfile(_index):
+        return FileResponse(_index)
     return {"status": "ok", "message": "AI 도면 분석 서버 실행 중"}
 
 
