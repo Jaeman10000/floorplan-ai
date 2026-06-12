@@ -12,7 +12,7 @@ AI 도면 분석 3D 공간 재설계 플랫폼 (SaaS)
 
 | 도구 | 잘하는 것 | 역할 |
 |------|---------|------|
-| OpenCV 형태학 연산 | 선 굵기 분리, 픽셀 좌표 계산 | 치수선 제거 → 벽 마스크 → 폴리곤 |
+| OpenCV 형태학 연산 | 국소 잉크 밀도, 픽셀 좌표 계산 | 밀도로 건물영역 검출 → 마스크 → 폴리곤 |
 | Tesseract OCR | 숫자/텍스트 읽기 | 치수 숫자 → 스케일(mm/px) 계산 |
 | Claude Vision API | 의미 이해 | 방 이름, 세대 분류, 공용부 식별 |
 
@@ -26,7 +26,7 @@ AI 도면 분석 3D 공간 재설계 플랫폼 (SaaS)
     ↓
 [Step 0] 도면 영역 자동 크롭 (용지 테두리·제목란 제거)
     ↓
-[Step 1] 형태학적 선 굵기 분리 (opening) → 치수선 제거 → 벽 마스크
+[Step 1] 국소 잉크 밀도 → density>임계 영역의 최대 연결요소 = 건물영역 마스크
     ↓
 [Step 2] OpenCV closing + RETR_EXTERNAL 가장 큰 contour → pts_px
     ↓
@@ -43,9 +43,11 @@ ExtractionResult 반환
 ### 왜 이 구조인가
 - OpenCV만으로는 외벽/치수선/테두리 구분 불가 (검증된 사실)
 - Vision API만으로는 픽셀 좌표 정확도 부족 (검증된 사실)
-- **외벽/벽체는 치수선보다 두껍다** → opening으로 얇은 치수선 제거 (Ahmed et al.)
-- 한국 CAD 이중선은 외벽/내벽 모두 1-5px → Step 2 closing이 건물 형태 책임
+- **두께 단일 신호 실패**: 외벽 두께가 불균일하면 opening이 얇은 외벽까지 지움
+  (새도면.png 전멸) → '건물 내부=잉크 빽빽, 치수선=외부 희박' 밀도 신호로 교체
+- Step 1 밀도 검출 → Step 2 closing + 외곽 contour가 건물 형태 책임
 - Vision API는 의미 이해만 담당 (텍스트, 세대 분류)
+- ⚠️ 밀도 한계: 희박한 큰 방은 under-capture (도면이미지.png 하단 -11%, docs 참조)
 
 ### 절대 하지 말 것
 - Vision API한테 좌표 추정, 선 추적, 치수선 계산 시키기
@@ -57,7 +59,7 @@ ExtractionResult 반환
 ```
 backend/
   server.py          — FastAPI 메인 서버
-  extractor.py       — 도면 분석 엔진 (OpenCV 선굵기분리+OCR+Vision API)
+  extractor.py       — 도면 분석 엔진 (OpenCV 잉크밀도+OCR+Vision API)
   dxf_builder.py     — pts_mm → DXF 변환
   blender_builder.py — pts_mm + rooms → Blender 스크립트
   outline.py         — 외곽 좌표 관리 (절대 변경 금지)
@@ -104,5 +106,9 @@ git push origin main   # 작업 완료 후
 - [x] extractor.py Step 2: closing + RETR_EXTERNAL 가장 큰 contour
 - [x] extractor.py Step 3: 변별 최대 치수 매칭 (도면이미지.png 34.12 mm/px 검증)
 - [x] 전체 파이프라인 테스트 (7각형, 207 m² — 세대 합계와 일치)
-- [ ] 다양한 도면 샘플로 일반화 검증 (현재 도면이미지.png 1건만 검증)
+- [x] Step 1 밀도 재설계 — 두께 opening이 새도면.png(불균일 얇은 외벽) 전멸
+      → 국소 잉크밀도+최대CC로 교체 (새도면 85.2 m² 정상화)
+- [ ] 밀도 under-capture 보완 — 희박한 큰 방 회복 (도면이미지 하단 -11%)
+      후보: 외곽벽 닫힌루프+flood-fill, 또는 의미 분할 모델 재검토
+- [ ] 도면 샘플 더 확보해 일반화 검증 (현재 2건: 도면이미지/새도면)
 - [ ] Railway 배포 확인

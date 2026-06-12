@@ -1,7 +1,7 @@
 # extractor.py
 # 파이프라인 (CLAUDE.md 정의):
 # Step 0: 도면 영역 자동 크롭 (용지 테두리·제목란 제거)
-# Step 1: 선 굵기 분리 (Ahmed et al.) → 두꺼운 선(외벽) 마스크
+# Step 1: 국소 잉크 밀도 → 건물 영역(풋프린트) 마스크
 # Step 2: OpenCV → 마스크 or 크롭 이미지 → pts_px (크롭 좌표계)
 # Step 3: Tesseract OCR → 치수 → scale_mm_per_px (크롭 좌표계)
 # Step 4: pts_px (원본 좌표) × scale → pts_mm (0,0 정규화)
@@ -196,17 +196,31 @@ def _step0_crop_floorplan(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — 선 굵기 분리 (Ahmed et al.)
+# Step 1 — 국소 잉크 밀도 기반 건물 영역 검출
 # ─────────────────────────────────────────────────────────────────────────────
+
+# 국소 잉크 밀도 파라미터 (도면 크기 비례 — 하드코딩 아님)
+_DENSITY_BOX_FRAC = 0.05    # 밀도 측정 박스 한 변 = min(h, w) × 이 비율
+_DENSITY_THRESHOLD = 0.10   # 박스 내 잉크 픽셀 비율이 이 값 초과면 '건물 내부'
 
 def _step1_wall_mask(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
     """
-    Ahmed et al. 검증 방법: 외벽은 내벽/치수선보다 항상 두껍다.
-    형태학적 opening으로 치수선(1-2px)을 제거한다.
+    건물 영역(풋프린트) 마스크를 '국소 잉크 밀도'로 검출한다.
 
-    커널 탐색: 남은 픽셀이 전체의 0.5~12%인 가장 작은 커널 선택.
-    한국 CAD 이중선 방식에서는 외벽/내벽 모두 1-5px로 비슷하므로,
-    치수선만 제거하는 수준에서 멈추고 나머지는 Step 2에서 처리.
+    왜 두께(opening)가 아니라 밀도인가:
+    "외벽은 항상 가장 두껍다"는 형태학적 opening 가정은 외벽 두께가 불균일한
+    도면(예: 상단·우측만 얇은 벽)에서 얇은 외벽을 통째로 지워버려 외곽 루프가
+    닫히지 않는다(검증: 새도면.png 상단벽 소실). 반대로 opening 커널을 줄이면
+    치수선·용지 테두리까지 살아남아 풋프린트가 마진까지 번진다. 즉 '두께' 단일
+    신호로는 얇은 진짜 벽과 얇은 치수선을 분리할 수 없다(CLAUDE.md 명시).
+
+    대신 '건물 내부는 벽·칸막이·가구·텍스트로 잉크가 빽빽하고, 치수선·인출선·
+    용지 테두리는 외부에 희박하게 고립'된다는 성질을 쓴다. 국소 잉크 밀도가
+    임계 이상인 영역의 '가장 큰 연결요소'가 건물 본체다. 치수 숫자 더미 등은
+    별도의 작은 연결요소로 떨어져 나가므로 자동 배제된다.
+
+    반환: 건물 영역 이진 마스크(uint8 0/255). 밀도 영역이 없으면 None
+    (→ Step 2의 OpenCV fallback 경로).
     """
     h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -214,30 +228,30 @@ def _step1_wall_mask(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
     # CAD 도면 = 흰 배경 + 검은 선 → 반전: 검은 선 → 흰 픽셀
     _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
-    # 커널 탐색: 치수선 제거 후 벽 선 남기기
-    TARGET_LO, TARGET_HI = 0.005, 0.12
-    chosen_mask: Optional[np.ndarray] = None
-    chosen_k = 0
-    chosen_ratio = 0.0
+    # 국소 잉크 밀도 = 박스 내 잉크 픽셀 비율 (boxFilter normalize)
+    box = int(max(15, min(h, w) * _DENSITY_BOX_FRAC)) | 1   # 홀수 보장
+    ink = (binary > 0).astype(np.float32)
+    density = cv2.boxFilter(ink, -1, (box, box), normalize=True)
+    dmask = (density > _DENSITY_THRESHOLD).astype(np.uint8)
 
-    for k in [5, 7, 9, 11, 15, 19, 25, 31]:
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-        ratio = float(np.count_nonzero(opened)) / (h * w)
-        if TARGET_LO <= ratio <= TARGET_HI:
-            chosen_mask = opened
-            chosen_k = k
-            chosen_ratio = ratio
-            break
+    # 가장 큰 연결요소 = 건물 본체 (치수선·테두리는 별도 작은 성분으로 배제)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(dmask, 8)
+    if n <= 1:
+        warnings.append("Step1: 밀도 건물영역 없음 — OpenCV fallback 사용")
+        return None
 
-    if chosen_mask is None:
-        warnings.append("Step1: 선 굵기 분리 실패 (적절한 커널 없음) — OpenCV fallback 사용")
+    big = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    mask = (labels == big).astype(np.uint8) * 255
+
+    ratio = float(np.count_nonzero(mask)) / (h * w)
+    if ratio < 0.02:
+        warnings.append("Step1: 밀도 건물영역 너무 작음 — OpenCV fallback 사용")
         return None
 
     warnings.append(
-        f"Step1: 선 굵기 분리 완료 (open_k={chosen_k}px, {chosen_ratio*100:.1f}% 두꺼운 선)"
+        f"Step1: 잉크밀도 건물영역 검출 (box={box}px, thr={_DENSITY_THRESHOLD:.0%}, {ratio*100:.1f}% 면적)"
     )
-    return chosen_mask
+    return mask
 
 
 # ─────────────────────────────────────────────────────────────────────────────
