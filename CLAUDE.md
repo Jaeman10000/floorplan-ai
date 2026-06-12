@@ -23,18 +23,17 @@ docs/
 ```
 
 ## extractor.py 핵심 설계 원칙 ⚠️
-**Vision API는 숫자 읽기만. 코드가 계산+검증+좌표 생성.**
+**Vision API는 픽셀 좌표 추적 + 스케일 계산. 코드는 pts_mm = pts_px × scale.**
 
-- Vision API 역할: 도면 4면 치수선 숫자 나열, 세대명/면적/방이름 읽기
-- 코드 역할: 사선 dx/dy 계산, 오각형 5개 좌표 생성, 검증
-- 절대 금지: Vision API에게 좌표 추정, 선 추적, 픽셀 계산 시키는 것
+- Vision API 역할: 외벽 꼭짓점 픽셀 좌표 직접 추적, 치수선으로 mm_per_px 계산, 세대명/면적/방이름 읽기
+- 코드 역할: `pts_mm = [(x * scale, y * scale) for x, y in pts_px]`
+- 절대 금지: Vision API에게 치수선 숫자로 좌표 계산시키는 것
+- 치수선 숫자는 스케일 계산(mm_per_px)에만 사용
 - 세대: 반드시 3개(A/B/C), 공용부(18.41m²)는 common_areas로만
 
 ```
-diagonal_dx = sum(top_dims) - sum(bottom_dims)
-diagonal_dy = sum(left_dims) - sum(right_dims)
-P0=(0,0) P1=(sum_top,0) P2=(sum_top,sum_right)
-P3=(sum_top+dx, sum_right+dy) P4=(0,sum_left)
+scale_mm_per_px = dim_mm / px_dist   # 치수선 1개로 계산
+pts_mm = [(x * scale, y * scale) for x, y in pts_px]
 ```
 
 자세한 설계는 docs/extractor_design.md 참고

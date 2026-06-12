@@ -1,6 +1,6 @@
 # extractor.py
 # 도면 이미지 → 구조화된 좌표 추출
-# Claude Vision API: 치수선 숫자 읽기 → 변 길이 기반 좌표 계산
+# Claude Vision API: 외벽 픽셀 좌표 직접 추적 + 치수선으로 스케일 계산
 
 import cv2
 import numpy as np
@@ -58,50 +58,6 @@ class ExtractionResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 건물 외곽 폴리곤 계산 (코드가 모든 계산 담당)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def outline_to_polygon(
-    outline: list,
-) -> Tuple[List[Tuple[float, float]], dict]:
-    """
-    외곽 선분 배열 → 폴리곤 꼭짓점 리스트.
-
-    (0, 0)에서 시작해 시계방향으로 각 선분을 누적한다.
-    마지막 점(시작점 복귀)은 제거해 N개 꼭짓점을 반환한다.
-
-    선분 형식:
-      직선: {"direction": "right"|"left"|"up"|"down", "length_mm": float}
-      사선: {"direction": "diagonal", "dx": float, "dy": float}
-        dx 양수=오른쪽, 음수=왼쪽 / dy 양수=아래, 음수=위
-    """
-    x, y = 0.0, 0.0
-    pts: List[Tuple[float, float]] = [(x, y)]
-
-    for seg in outline:
-        d = seg.get("direction", "")
-        if d == "right":
-            x += float(seg.get("length_mm", 0))
-        elif d == "left":
-            x -= float(seg.get("length_mm", 0))
-        elif d == "down":
-            y += float(seg.get("length_mm", 0))
-        elif d == "up":
-            y -= float(seg.get("length_mm", 0))
-        elif d == "diagonal":
-            x += float(seg.get("dx", 0))
-            y += float(seg.get("dy", 0))
-        pts.append((x, y))
-
-    closure_err = math.hypot(x, y)
-    stats = {
-        "closure_error_mm": closure_err,
-        "vertex_count": len(pts) - 1,
-    }
-    return pts[:-1], stats
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 메인 추출 함수
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -134,59 +90,54 @@ def extract_outline(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude Vision API — 숫자 읽기 전담 (계산 없음)
+# Claude Vision API — 외벽 픽셀 좌표 추적 + 스케일 계산
 # ─────────────────────────────────────────────────────────────────────────────
 
 _VISION_PROMPT = """\
-이 건축 도면 이미지에서 건물 외곽 정보를 읽어 JSON으로만 반환하라.
-JSON 외 다른 텍스트는 절대 포함하지 마라.
-계산하지 말 것. 도면에 인쇄된 치수선 숫자만 그대로 읽어라.
+이 건축 도면 이미지를 분석하여 JSON으로만 반환하라. JSON 외 다른 텍스트는 절대 포함하지 마라.
 
-[outline — 건물 외곽 선분 목록]
-좌상단 꼭짓점에서 시계방향으로 한 바퀴 돌면서 각 변을 순서대로 기재한다.
+[할 일 1: 외벽 꼭짓점 픽셀 좌표 추적]
+1. 도면에서 건물 최외곽 벽체선(가장 굵은 이중선)을 찾아라
+2. 좌상단 꼭짓점부터 시계방향으로 모든 꼭짓점을 순서대로 추적하라
+3. 각 꼭짓점의 픽셀 좌표 [x, y]를 읽어라 — 이미지 좌상단이 [0, 0]
+4. 꼭짓점은 벽선이 꺾이는 지점만 포함 (직선 중간점 포함 금지)
+5. 세대 구분선·대지 경계선이 아닌 건물 외벽만 추적
 
-• 직선 변: {"direction": "right"|"left"|"up"|"down", "length_mm": 정수}
-• 사선 변: {"direction": "diagonal", "dx": 정수, "dy": 정수}
-  dx 양수=오른쪽, 음수=왼쪽 / dy 양수=아래, 음수=위 (부호 정확히 기재)
-
-outline 작성 규칙:
-1. 좌상단 꼭짓점에서 시작, 시계방향으로 진행
-2. 모든 변을 빠짐없이 기재 — 마지막 변 끝이 시작점으로 정확히 돌아와야 함
-3. 건물 외벽 치수선만 — 대지 경계선·세대 구분선은 무시
-4. 치수선에 적힌 숫자 그대로 (계산·보정 금지)
-5. 방 면적(59.76 등 소수)을 length_mm에 넣지 말 것
+[할 일 2: 스케일 계산]
+6. 도면에서 치수선(화살표+숫자) 하나를 찾아라 — 가능하면 긴 치수선 선택
+7. 그 치수선의 양 끝 픽셀 좌표를 측정하고 픽셀 거리를 구하라
+8. scale_mm_per_px = 치수_숫자(mm) / 픽셀_거리 를 계산하라
+9. pts_px 좌표 계산에 치수선 숫자를 절대 사용하지 마라 — 스케일 계산에만 사용
 
 [읽어야 할 항목]
-• outline     : 위 규칙에 따른 외곽 선분 배열
-• units       : 세대 이름, 면적(m²), 방 이름 목록
-               (거실·침실이 있고 면적 30m² 이상인 주거 단위만, 18m² 이하 절대 포함 금지)
-• common_areas: 공용부 이름 목록 (계단실, 엘리베이터홀, 복도 등)
-• common_area_m2: 공용부 면적 합계 (없으면 0)
+• pts_px          : 외벽 꼭짓점 픽셀 좌표 배열 [[x,y], ...]
+• scale_mm_per_px : 스케일 값 (실수)
+• scale_ref       : 스케일 계산 근거 {"dim_mm": 숫자, "px_dist": 숫자}
+• units           : 세대 이름/면적/방목록
+                   (거실·침실 있고 면적 30m² 이상인 주거 단위만)
+• common_areas    : 공용부 이름 목록 (계단실, 엘리베이터홀, 복도 등)
+• common_area_m2  : 공용부 면적 합계 (없으면 0)
+• confidence      : 0.0~1.0
 
-[응답 형식 예시 — 우하단 사선 건물]
+[응답 형식 예시]
 {
-  "outline": [
-    {"direction": "right",    "length_mm": 13000},
-    {"direction": "down",     "length_mm": 16400},
-    {"direction": "diagonal", "dx": -3400, "dy": 2900},
-    {"direction": "diagonal", "dx": -6200, "dy": 0},
-    {"direction": "diagonal", "dx": -3400, "dy": -2900},
-    {"direction": "up",       "length_mm": 16400}
-  ],
+  "pts_px": [[120, 85], [780, 85], [780, 620], [650, 750], [120, 750]],
+  "scale_mm_per_px": 18.5,
+  "scale_ref": {"dim_mm": 13000, "px_dist": 703},
   "units": [
-    {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
-    {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "침실", "욕실", "주방"]},
-    {"name": "C", "area_m2": 64.00, "rooms": ["거실", "침실", "침실", "욕실", "주방", "발코니"]}
+    {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "욕실", "주방"]},
+    {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
+    {"name": "C", "area_m2": 64.00, "rooms": ["거실", "침실", "침실", "욕실", "주방"]}
   ],
   "common_areas": ["계단실", "엘리베이터홀"],
   "common_area_m2": 18.41,
-  "confidence": 0.0~1.0,
+  "confidence": 0.85,
   "warnings": []
 }"""
 
 
 def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optional[ExtractionResult]:
-    """Claude Vision API 호출 — 치수 숫자 읽기 전담"""
+    """Claude Vision API 호출 — 외벽 픽셀 좌표 추적 전담"""
 
     with open(image_path, "rb") as f:
         img_data = base64.standard_b64encode(f.read()).decode("utf-8")
@@ -234,55 +185,35 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
     return _vision_data_to_result(data, warnings)
 
 
-def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
-    """Vision JSON → outline_to_polygon() 호출 → ExtractionResult"""
+def _vision_data_to_result(data: dict, warnings: list) -> Optional[ExtractionResult]:
+    """Vision JSON → pts_px × scale → ExtractionResult"""
 
-    outline = data.get("outline", [])
+    pts_px_raw = data.get("pts_px", [])
+    scale = float(data.get("scale_mm_per_px", 0.0))
 
-    if not outline:
-        warnings.append("outline 데이터 없음 — 좌표 계산 불가")
-        pts_mm: List[Tuple[float, float]] = []
-    else:
-        pts_mm, stats = outline_to_polygon(outline)
+    if not pts_px_raw:
+        warnings.append("pts_px 데이터 없음 — OpenCV fallback")
+        return None
 
-        err = stats["closure_error_mm"]
-        if err > 100:
-            warnings.append(
-                f"외곽선 미폐합: 오차 {err:.0f}mm — outline 치수 누락 의심"
-            )
-        elif err > 10:
-            warnings.append(f"외곽선 폐합 오차 {err:.0f}mm (허용 범위)")
+    if scale <= 0:
+        warnings.append("scale_mm_per_px 유효하지 않음 — OpenCV fallback")
+        return None
 
-        if len(pts_mm) < 3:
-            warnings.append(f"꼭짓점 {len(pts_mm)}개 — 외곽선 계산 실패")
-            pts_mm = []
-        else:
-            diag_segs = [s for s in outline if s.get("direction") == "diagonal"]
-            if diag_segs:
-                warnings.append(
-                    f"사선 {len(diag_segs)}개 포함 — "
-                    + ", ".join(
-                        f"dx={s.get('dx',0)}/dy={s.get('dy',0)}" for s in diag_segs
-                    )
-                )
+    pts_px = [(float(p[0]), float(p[1])) for p in pts_px_raw]
+    pts_mm: List[Tuple[float, float]] = [(x * scale, y * scale) for x, y in pts_px]
 
-    area_m2 = _shoelace_area_m2(pts_mm) if pts_mm else 0.0
+    if len(pts_mm) < 3:
+        warnings.append(f"꼭짓점 {len(pts_mm)}개 — 외곽선 추출 실패, OpenCV fallback")
+        return None
 
-    # outline에서 고유 치수값 수집
-    dims: List[float] = []
-    for seg in outline:
-        d = seg.get("direction", "")
-        if d in ("right", "left", "up", "down"):
-            v = float(seg.get("length_mm", 0))
-            if v > 0:
-                dims.append(v)
-        elif d == "diagonal":
-            dx = abs(float(seg.get("dx", 0)))
-            dy = abs(float(seg.get("dy", 0)))
-            if dx > 0:
-                dims.append(dx)
-            if dy > 0:
-                dims.append(dy)
+    area_m2 = _shoelace_area_m2(pts_mm)
+
+    scale_ref = data.get("scale_ref", {})
+    if scale_ref:
+        warnings.append(
+            f"스케일 기준: {scale_ref.get('dim_mm','')}mm / {scale_ref.get('px_dist','')}px"
+            f" = {scale:.3f} mm/px"
+        )
 
     # 세대
     units: List[UnitInfo] = []
@@ -312,12 +243,12 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
     warnings.extend(data.get("warnings", []))
 
     return ExtractionResult(
-        pts_px=[],
+        pts_px=[(int(x), int(y)) for x, y in pts_px],
         pts_mm=pts_mm,
-        scale_mm_per_px=1.0,
+        scale_mm_per_px=scale,
         area_m2=round(area_m2, 2),
         confidence=float(data.get("confidence", 0.8)),
-        ocr_dimensions=sorted(set(dims), reverse=True),
+        ocr_dimensions=[],
         warnings=warnings,
         units=units,
         common_areas=common_areas,
@@ -334,7 +265,9 @@ def _extract_with_opencv(
 ) -> ExtractionResult:
     """OpenCV 기반 외곽선 추출 (Vision API 실패 시 fallback)"""
 
-    img = cv2.imread(image_path)
+    # cv2.imread는 Windows에서 비 ASCII 경로를 지원하지 않으므로 np.fromfile로 우회
+    buf = np.fromfile(image_path, dtype=np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
 

@@ -3,101 +3,67 @@
 ## 핵심 원칙
 
 ```
-Vision API  →  숫자 읽기만 (계산 금지)
-코드        →  계산 + 검증 + 좌표 생성
+Vision API  →  외벽 픽셀 좌표 직접 추적 + 치수선으로 스케일 계산
+코드        →  pts_mm = pts_px × scale_mm_per_px
 ```
 
-## Vision API 역할 (딱 이것만)
+치수선 숫자는 **스케일 계산에만** 사용한다. 좌표 계산에 절대 사용하지 않는다.
 
-건물 외곽을 **좌상단에서 시계방향으로 한 바퀴** 돌면서 각 변의 방향과 치수를 순서대로 읽는다.
+## Vision API 역할
+
+### 할 일 1: 외벽 꼭짓점 픽셀 좌표 추적
+
+1. 건물 최외곽 벽체선(가장 굵은 이중선)을 찾는다
+2. 좌상단 꼭짓점부터 시계방향으로 모든 꼭짓점을 추적한다
+3. 각 꼭짓점의 픽셀 좌표 `[x, y]`를 읽는다 (이미지 좌상단이 `[0, 0]`)
+4. 꼭짓점은 벽선이 꺾이는 지점만 — 직선 중간점 포함 금지
+5. 세대 구분선·대지 경계선이 아닌 건물 외벽만
+
+### 할 일 2: 스케일 계산
+
+6. 치수선(화살표+숫자) 하나를 찾는다 (긴 것 우선)
+7. 치수선 양 끝 픽셀 거리를 측정한다
+8. `scale_mm_per_px = 치수_숫자(mm) / 픽셀_거리`
+
+### 응답 JSON
 
 ```json
 {
-  "outline": [
-    {"direction": "right",    "length_mm": 13000},
-    {"direction": "down",     "length_mm": 16400},
-    {"direction": "diagonal", "dx": -3400, "dy": 2900},
-    {"direction": "left",     "length_mm": 9600},
-    {"direction": "up",       "length_mm": 19300}
-  ],
+  "pts_px": [[120, 85], [780, 85], [780, 620], [650, 750], [120, 750]],
+  "scale_mm_per_px": 18.5,
+  "scale_ref": {"dim_mm": 13000, "px_dist": 703},
   "units": [
-    {"name": "A", "area_m2": 59.76, "rooms": ["거실","침실","욕실","주방","현관"]},
-    {"name": "B", "area_m2": 65.21, "rooms": ["거실","침실","침실","욕실","주방","파우더룸"]},
-    {"name": "C", "area_m2": 64.00, "rooms": ["거실","침실","침실","욕실","주방","발코니"]}
+    {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "욕실", "주방"]},
+    {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
+    {"name": "C", "area_m2": 64.00, "rooms": ["거실", "침실", "침실", "욕실", "주방"]}
   ],
-  "common_areas":   ["계단실", "엘리베이터홀"],
+  "common_areas": ["계단실", "엘리베이터홀"],
   "common_area_m2": 18.41,
   "confidence": 0.85,
   "warnings": []
 }
 ```
 
-### 선분 형식
-
-| 변 종류 | 형식 |
-|---------|------|
-| 직선    | `{"direction": "right"\|"left"\|"up"\|"down", "length_mm": 정수}` |
-| 사선    | `{"direction": "diagonal", "dx": 정수, "dy": 정수}` |
-
-- `dx` 양수=오른쪽, 음수=왼쪽
-- `dy` 양수=아래, 음수=위
-
-### Vision API 프롬프트 규칙
-
-1. 좌상단 꼭짓점에서 시작, 시계방향으로 진행
-2. 모든 변 빠짐없이 기재 — 마지막 변 끝이 시작점으로 정확히 돌아와야 함
-3. 건물 외벽 치수선만 (대지 경계선·세대 구분선 무시)
-4. 치수선 숫자 그대로 (계산·보정 금지)
-5. 방 면적(소수) 을 length_mm에 넣지 말 것
-
-## 코드 처리 로직 — outline_to_polygon()
+## 코드 처리 로직
 
 ```python
-def outline_to_polygon(outline):
-    x, y = 0, 0
-    pts = [(x, y)]
-    for seg in outline:
-        d = seg["direction"]
-        if d == "right":      x += seg["length_mm"]
-        elif d == "left":     x -= seg["length_mm"]
-        elif d == "down":     y += seg["length_mm"]
-        elif d == "up":       y -= seg["length_mm"]
-        elif d == "diagonal": x += seg["dx"]; y += seg["dy"]
-        pts.append((x, y))
-    return pts[:-1]   # 시작점 복귀점 제거
+pts_px = data["pts_px"]                        # Vision이 읽은 픽셀 좌표
+scale  = data["scale_mm_per_px"]               # Vision이 계산한 스케일
+pts_mm = [(x * scale, y * scale) for x, y in pts_px]
+area_m2 = shoelace(pts_mm) / 1e6
 ```
 
-### 폐합 검증
+별도 좌표 계산 없음. 폐합 검증도 없음 — 픽셀 좌표가 직접 다각형을 구성한다.
 
-마지막 점이 (0, 0)으로 돌아오는지 확인한다:
-- `closure_error_mm > 100` → 경고: outline 치수 누락 의심
-- `closure_error_mm > 10`  → 경고: 허용 범위 내 오차
+## 구 방식과의 차이
 
-### 지원하는 건물 형태 예시
-
-**직사각형 (4꼭짓점)**
-```
-right 10000 → down 8000 → left 10000 → up 8000
-P0=(0,0)  P1=(10000,0)  P2=(10000,8000)  P3=(0,8000)
-```
-
-**오각형 — 우하단 사선 (5꼭짓점, 역곡동 도면)**
-```
-right 13000 → down 16400 → diagonal(-3400,+2900) → left 9600 → up 19300
-P0=(0,0)  P1=(13000,0)  P2=(13000,16400)  P3=(9600,19300)  P4=(0,19300)
-```
-
-**육각형 — 복수 사선 (6꼭짓점)**
-```
-right 13000 → down 16400
-  → diagonal(-3400,+2900) → diagonal(-6200,0) → diagonal(-3400,-2900)
-  → up 16400
-```
-
-**L자형 (6꼭짓점)**
-```
-right 8000 → down 5000 → left 4000 → down 5000 → left 4000 → up 10000
-```
+| 항목 | 구 방식 (outline 배열) | 신 방식 (픽셀 좌표 추적) |
+|------|----------------------|------------------------|
+| Vision 입력 | 치수선 숫자 목록 | 외벽 픽셀 좌표 목록 |
+| 오류 원인 | 합계/개별 치수 혼동 | 픽셀 위치 오인식 |
+| 코드 계산 | outline_to_polygon() | pts_px × scale |
+| 폐합 검증 | 필요 | 불필요 |
+| 사선 처리 | dx/dy 수동 입력 | 자동 (픽셀 좌표로 표현됨) |
 
 ## 세대 규칙
 
@@ -108,16 +74,18 @@ right 8000 → down 5000 → left 4000 → down 5000 → left 4000 → up 10000
 
 ## OpenCV Fallback
 
-ANTHROPIC_API_KEY 없거나 Vision API 실패 시:
+ANTHROPIC_API_KEY 없거나 Vision API가 유효한 결과를 반환하지 못할 때:
+
+- Vision이 `None`을 반환하는 조건: `pts_px` 없음, `scale_mm_per_px <= 0`, 꼭짓점 3개 미만
 - OpenCV로 외곽선 추출 (대략적)
-- Tesseract OCR로 치수 숫자 읽기 시도
+- Tesseract OCR로 치수 숫자 읽어 스케일 추정
 - confidence: 0.4 (낮음 표시)
 
 ## 한계
 
-- Vision이 숫자를 잘못 읽으면 오류 (3300 → 3800 등)
-- 치수선이 없는 도면은 처리 불가
-- 폐합 오차가 크면 외곽선 왜곡 가능
+- Vision이 외벽을 세대 구분선으로 오인하면 잘못된 다각형 생성
+- 저해상도 이미지에서 픽셀 위치 오차 발생 가능
+- 치수선이 없는 도면은 스케일 계산 불가 (OpenCV fallback)
 
 ## 변경 이력
 
@@ -132,3 +100,7 @@ ANTHROPIC_API_KEY 없거나 Vision API 실패 시:
 | 2026.06.12 | outline 배열 구조로 완전 재설계 — 어떤 형태든 지원 |
 |            | build_pentagon() 제거 → outline_to_polygon() 도입 |
 |            | top_dims/left_dims/has_diagonal 완전 제거 |
+| 2026.06.12 | 픽셀 좌표 직접 추적 방식으로 재설계 |
+|            | outline 배열·outline_to_polygon() 완전 제거 |
+|            | Vision: 치수 읽기 → 외벽 픽셀 좌표 추적 + 스케일 계산 |
+|            | pts_mm = pts_px × scale_mm_per_px (코드 계산 단순화) |
