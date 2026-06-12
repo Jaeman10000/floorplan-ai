@@ -1,7 +1,7 @@
 # extractor.py
 # 파이프라인 (CLAUDE.md 정의):
 # Step 0: 도면 영역 자동 크롭 (용지 테두리·제목란 제거)
-# Step 1: 딥러닝 (CubiCasa5K SegFormer) → 벽 픽셀 마스크
+# Step 1: 선 굵기 분리 (Ahmed et al.) → 두꺼운 선(외벽) 마스크
 # Step 2: OpenCV → 마스크 or 크롭 이미지 → pts_px (크롭 좌표계)
 # Step 3: Tesseract OCR → 치수 → scale_mm_per_px (크롭 좌표계)
 # Step 4: pts_px (원본 좌표) × scale → pts_mm (0,0 정규화)
@@ -76,7 +76,7 @@ def extract_outline(
     # ── Step 0: 도면 영역 크롭 ────────────────────────────────────────────
     img_work, crop_x, crop_y = _step0_crop_floorplan(img, warnings)
 
-    # ── Step 1: 딥러닝 벽 마스크 (크롭 이미지 사용) ───────────────────────
+    # ── Step 1: 선 굵기 분리 벽 마스크 (크롭 이미지 사용) ─────────────────
     mask = _step1_wall_mask(img_work, warnings)
 
     # ── Step 2: 외곽 폴리곤 (크롭 좌표계) ────────────────────────────────
@@ -196,139 +196,48 @@ def _step0_crop_floorplan(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — 딥러닝 벽 마스크
+# Step 1 — 선 굵기 분리 (Ahmed et al.)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _step1_wall_mask(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
     """
-    CubiCasa5K SegFormer → HuggingFace SegFormer 순으로 시도.
-    둘 다 실패하면 None → Step 2에서 OpenCV fallback.
-    입력은 크롭된 이미지(img_work).
+    Ahmed et al. 검증 방법: 외벽은 내벽/치수선보다 항상 두껍다.
+    형태학적 opening으로 치수선(1-2px)을 제거한다.
+
+    커널 탐색: 남은 픽셀이 전체의 0.5~12%인 가장 작은 커널 선택.
+    한국 CAD 이중선 방식에서는 외벽/내벽 모두 1-5px로 비슷하므로,
+    치수선만 제거하는 수준에서 멈추고 나머지는 Step 2에서 처리.
     """
-    mask = _try_cubicasa5k(img, warnings)
-    if mask is not None:
-        return mask
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    mask = _try_huggingface(img, warnings)
-    if mask is not None:
-        return mask
+    # CAD 도면 = 흰 배경 + 검은 선 → 반전: 검은 선 → 흰 픽셀
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
-    warnings.append("Step1: 딥러닝 모델 없음 — Step2 OpenCV fallback")
-    return None
+    # 커널 탐색: 치수선 제거 후 벽 선 남기기
+    TARGET_LO, TARGET_HI = 0.005, 0.12
+    chosen_mask: Optional[np.ndarray] = None
+    chosen_k = 0
+    chosen_ratio = 0.0
 
+    for k in [5, 7, 9, 11, 15, 19, 25, 31]:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        ratio = float(np.count_nonzero(opened)) / (h * w)
+        if TARGET_LO <= ratio <= TARGET_HI:
+            chosen_mask = opened
+            chosen_k = k
+            chosen_ratio = ratio
+            break
 
-def _try_cubicasa5k(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
-    """
-    JessiP23/cubicasa-segformer-v2 (segmentation_models_pytorch + albumentations).
-    Wall class = 1.  가중치는 HuggingFace cache에서 자동 다운로드.
-    CUBICASA5K_WEIGHTS 환경변수로 로컬 경로 지정 가능.
-    """
-    try:
-        import torch
-        import segmentation_models_pytorch as smp
-        import albumentations as A
-        from albumentations.pytorch import ToTensorV2
-        from huggingface_hub import hf_hub_download
-
-        weights_path = os.environ.get("CUBICASA5K_WEIGHTS", "")
-        if not weights_path or not os.path.isfile(weights_path):
-            repo_id = os.environ.get(
-                "CUBICASA5K_HF_REPO", "JessiP23/cubicasa-segformer-v2"
-            )
-            weights_path = hf_hub_download(
-                repo_id=repo_id, filename="cubicasa_segformer_best.pt"
-            )
-
-        ck  = torch.load(weights_path, map_location="cpu", weights_only=False)
-        enc = ck.get("encoder_name", "mit_b2")
-        sz  = ck.get("img_size", 640)
-        n   = ck.get("num_classes", 18)
-
-        model = smp.Segformer(encoder_name=enc, classes=n)
-        model.load_state_dict(ck["model_state_dict"])
-        model.eval()
-
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        tf  = A.Compose([A.Resize(sz, sz), A.Normalize(), ToTensorV2()])
-        inp = tf(image=img_rgb)["image"].unsqueeze(0)
-
-        with torch.no_grad():
-            pred_small = model(inp).argmax(1).squeeze().numpy()
-
-        pred = cv2.resize(
-            pred_small.astype(np.uint8),
-            (img.shape[1], img.shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
-        wall_mask = (pred == 1).astype(np.uint8) * 255  # Wall class = 1
-
-        min_px = img.shape[0] * img.shape[1] * 0.02  # 최소 2%
-        if wall_mask.sum() / 255 < min_px:
-            warnings.append(
-                f"CubiCasa5K 벽 마스크 부족 ({int(wall_mask.sum()//255)}px < {min_px:.0f}) — 건너뜀"
-            )
-            return None
-
-        warnings.append(f"Step1: CubiCasa5K ({enc}) wall={int(wall_mask.sum()//255)}px")
-        return wall_mask
-
-    except ImportError as e:
-        warnings.append(f"CubiCasa5K 의존성 없음 ({str(e)[:40]}) — HuggingFace 시도")
-        return None
-    except Exception as e:
-        warnings.append(f"CubiCasa5K 실패: {str(e)[:80]}")
+    if chosen_mask is None:
+        warnings.append("Step1: 선 굵기 분리 실패 (적절한 커널 없음) — OpenCV fallback 사용")
         return None
 
-
-def _try_huggingface(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
-    """
-    HuggingFace SegFormer 세분화 모델.
-    FLOORPLAN_DL_MODEL 환경 변수로 모델 ID 지정 필수 (미설정 시 건너뜀).
-    """
-    model_id = os.environ.get("FLOORPLAN_DL_MODEL", "")
-    if not model_id:
-        warnings.append("FLOORPLAN_DL_MODEL 미설정 — HuggingFace 건너뜀")
-        return None
-
-    try:
-        import torch
-        from PIL import Image as PILImage
-        from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
-
-        image = PILImage.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        processor = SegformerImageProcessor.from_pretrained(model_id)
-        model     = SegformerForSemanticSegmentation.from_pretrained(model_id)
-        model.eval()
-
-        inputs = processor(images=image, return_tensors="pt")
-        with torch.no_grad():
-            logits = model(**inputs).logits
-
-        pred = logits.argmax(dim=1).squeeze().numpy().astype(np.uint8)
-        pred_full = cv2.resize(pred, (img.shape[1], img.shape[0]),
-                               interpolation=cv2.INTER_NEAREST)
-
-        id2label = getattr(model.config, "id2label", {})
-        wall_ids = [k for k, v in id2label.items() if "wall" in str(v).lower()]
-        if not wall_ids:
-            wall_ids = [0]
-
-        wall_mask = np.isin(pred_full, wall_ids).astype(np.uint8) * 255
-
-        min_px = img.shape[0] * img.shape[1] * 0.02
-        if wall_mask.sum() / 255 < min_px:
-            warnings.append(f"HuggingFace({model_id}) 벽 마스크 부족 — 건너뜀")
-            return None
-
-        warnings.append(f"Step1: HuggingFace {model_id}")
-        return wall_mask
-
-    except ImportError:
-        warnings.append("transformers 미설치 — 딥러닝 건너뜀")
-        return None
-    except Exception as e:
-        warnings.append(f"HuggingFace 실패: {str(e)[:80]}")
-        return None
+    warnings.append(
+        f"Step1: 선 굵기 분리 완료 (open_k={chosen_k}px, {chosen_ratio*100:.1f}% 두꺼운 선)"
+    )
+    return chosen_mask
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -355,21 +264,34 @@ def _step2_polygon(
 def _polygon_from_mask(
     mask: np.ndarray, epsilon_ratio: float, warnings: list
 ) -> List[Tuple[int, int]]:
-    """벽 마스크 → 외곽 폴리곤. 모폴로지로 벽 픽셀을 연결해 외곽선 추출."""
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=4)
-    filled = _flood_fill_interior(closed)
+    """
+    벽 마스크 → 외곽 폴리곤.
 
-    contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    한국 CAD 이중선 방식: 외벽/내벽 모두 1-5px. closing(≈77px)으로 흩어진
+    벽 선들을 하나의 건물 blob으로 병합한 뒤, RETR_EXTERNAL로 외곽 contour만
+    추출한다(내부 방 구멍은 자동 무시). 페이지 테두리 잔여선 등은 면적이
+    작으므로 가장 큰 contour만 채택해 건물 본체를 잡는다.
+    """
+    h, w = mask.shape[:2]
+
+    # 문 개구부/벽 간격을 메워 건물을 단일 blob으로 — 방 내부는 채워지지 않으나
+    # RETR_EXTERNAL이 외곽만 반환하므로 무관.
+    close_k = max(40, min(h, w) // 10)   # ≈77px
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
+        warnings.append("마스크 외곽 contour 없음")
         return []
 
     main = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(main) < mask.shape[0] * mask.shape[1] * 0.02:
+    if cv2.contourArea(main) < h * w * 0.02:
         warnings.append("마스크 외곽 면적 너무 작음")
         return []
 
     approx = _simplify_contour(main, epsilon_ratio)
+    warnings.append(f"Step2: 벽 마스크 외곽 → {len(approx)}각형")
     return [(int(p[0][0]), int(p[0][1])) for p in approx]
 
 
@@ -404,16 +326,6 @@ def _polygon_from_image(
 
     warnings.append(f"Step2: OpenCV fallback — {len(pts)}각형")
     return pts
-
-
-def _flood_fill_interior(mask: np.ndarray) -> np.ndarray:
-    """벽 마스크 내부를 채워 solid polygon으로 만든다."""
-    filled = mask.copy()
-    h, w = filled.shape
-    seed = np.zeros((h + 2, w + 2), np.uint8)
-    cv2.floodFill(filled, seed, (0, 0), 255)
-    filled_inv = cv2.bitwise_not(filled)
-    return cv2.bitwise_or(mask, filled_inv)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -734,7 +646,15 @@ def _configure_tesseract(pytesseract):
 def _match_dims_to_edges(
     pts_px: list, tokens: list, warnings: list
 ) -> Optional[float]:
-    """치수 토큰을 외곽 변에 매칭해 mm/px 스케일 추정 (가중 클러스터 방식)."""
+    """
+    치수 토큰을 외곽 변에 매칭해 mm/px 스케일 추정.
+
+    핵심: 폴리곤 변 = 외벽 전체 길이 → 그 변의 mm 길이는 '전체 치수'다.
+    한 변 근처에는 전체 치수(예 13000)와 bay 분할 치수(3000/3300/…)가 함께
+    배치되는데, bay는 변의 부분구간일 뿐이므로 변에 매칭하면 안 된다.
+    → 각 변에 대해 근처 토큰 중 '가장 큰 값'(=전체 치수)만 채택한다.
+    그 뒤 변마다 얻은 scale 후보를 변 길이로 가중 클러스터링.
+    """
     n = len(pts_px)
     edges = []
     for i in range(n):
@@ -748,21 +668,20 @@ def _match_dims_to_edges(
 
     xs, ys = [p[0] for p in pts_px], [p[1] for p in pts_px]
     diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
-    max_dist = diag * 0.10
+    max_dist = diag * 0.25  # 치수선은 외벽 바깥쪽에 배치되므로 25% 허용
 
+    # 변마다: 근처(perp<max_dist, 중앙부 t∈[0.2,0.8])에서 가장 큰 토큰 값 채택
     cands = []
-    for tk in tokens:
-        best = None
-        for ax, ay, bx, by, length in edges:
+    for ax, ay, bx, by, length in edges:
+        edge_max = 0.0
+        for tk in tokens:
             d, t = _pt_seg_dist(tk["cx"], tk["cy"], ax, ay, bx, by)
-            if t < 0.15 or t > 0.85:
+            if t < 0.2 or t > 0.8:
                 continue
-            if best is None or d < best[0]:
-                best = (d, length)
-        if best and best[0] <= max_dist:
-            c = tk["value"] / best[1]
-            if c > 0:
-                cands.append((c, best[1]))
+            if d <= max_dist and tk["value"] > edge_max:
+                edge_max = tk["value"]
+        if edge_max > 0:
+            cands.append((edge_max / length, length))
 
     if not cands:
         return None
@@ -777,7 +696,7 @@ def _match_dims_to_edges(
     cluster = [(c, w) for c, w in cands if abs(c - best_c) / best_c <= tol]
     tw = sum(w for _, w in cluster)
     scale = sum(c * w for c, w in cluster) / tw
-    warnings.append(f"Step3: 치수 {len(cands)}개 매칭 / 채택 {len(cluster)}개 → {scale:.3f} mm/px")
+    warnings.append(f"Step3: 변 {len(cands)}개 매칭 / 채택 {len(cluster)}개 → {scale:.3f} mm/px")
     return scale
 
 

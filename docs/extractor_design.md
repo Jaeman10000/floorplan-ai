@@ -6,18 +6,22 @@
 
 | 도구 | 역할 |
 |------|------|
-| CubiCasa5K / HuggingFace | 벽 픽셀 마스크 생성 (의미 이해) |
-| OpenCV | 마스크 → 폴리곤 좌표 계산 (수치 계산) |
+| OpenCV 형태학 연산 | 선 굵기 분리 → 벽 마스크 → 폴리곤 좌표 계산 |
 | Tesseract OCR | 치수 숫자 읽기 → mm/px 스케일 (숫자 읽기) |
 | Claude Vision API | 방 이름 / 세대 분류 / 공용부 (의미 이해) |
+
+> **딥러닝 모델(CubiCasa5K/HuggingFace)은 제거됨.** 가중치 다운로드·환경
+> 의존성이 크고, 검증된 형태학적 선 굵기 분리(Ahmed et al.)로 대체했다.
 
 ## 파이프라인
 
 ```
 도면 이미지
     ↓
-[Step 1] 딥러닝 → 벽 픽셀 마스크
-    실패 시 → Step 2에서 원본 이미지 직접 사용
+[Step 0] 도면 영역 자동 크롭 (용지 테두리·제목란 제거)
+    ↓
+[Step 1] 선 굵기 분리 (Ahmed et al.) → 벽 마스크
+    실패 시 → Step 2에서 크롭 이미지 직접 사용 (OpenCV fallback)
     ↓
 [Step 2] OpenCV → 마스크(or 원본) → 외곽 폴리곤 pts_px
     ↓
@@ -32,45 +36,36 @@
 ExtractionResult 반환
 ```
 
-## Step 1: 딥러닝 벽 마스크
+## Step 1: 선 굵기 분리 (Ahmed et al.)
 
-### CubiCasa5K (우선 시도)
-
-```bash
-pip install floortrans  # 또는 pip install cubicasa5k
-```
-
-환경 변수:
-- `CUBICASA5K_WEIGHTS` — 로컬 가중치 파일 경로
-- `CUBICASA5K_HF_REPO` — HuggingFace 저장소 (기본: `CubiCasa/CubiCasa5K`)
-
-가중치 없으면 `huggingface_hub.hf_hub_download()`로 자동 다운로드.  
-출력: 클래스 2(wall) 픽셀을 255로 마스킹한 그레이스케일 이미지.
-
-### HuggingFace SegFormer (차선)
-
-```bash
-pip install transformers
-```
-
-환경 변수:
-- `FLOORPLAN_DL_MODEL` — HuggingFace 모델 ID (미설정 시 이 단계 건너뜀)
+검증된 사실: **외벽/벽체는 치수선·인출선보다 두껍다.** 형태학적 opening으로
+얇은 선(치수선 1-2px)을 제거하고 벽 픽셀만 남긴다.
 
 ```
-예: FLOORPLAN_DL_MODEL=nvidia/segformer-b2-finetuned-ade-512-512
+grayscale → THRESH_BINARY_INV (검은 선 → 흰 픽셀)
+    ↓
+커널 k ∈ {5,7,9,…,31} 순회하며 MORPH_OPEN
+    ↓
+남은 픽셀 비율이 0.5~12%인 가장 작은 k 채택 → 벽 마스크
 ```
 
-`id2label`에서 "wall" 포함 클래스 자동 탐색 → 없으면 ADE20K class 0 사용.
+한국 CAD 이중선 도면은 외벽/내벽 모두 1-5px로 비슷해 **완전한 외벽-only 분리는
+불가능**하다. 따라서 Step 1은 치수선 제거 수준에서 멈추고, 건물 외곽 형태는
+Step 2의 closing + 외곽 contour가 책임진다. 적절한 커널이 없으면 `None`을
+반환해 Step 2의 OpenCV fallback 경로로 넘어간다.
 
 ## Step 2: OpenCV 폴리곤
 
-마스크 있을 때:
-1. `MORPH_CLOSE` (7×7, 4회) — 벽 픽셀 연결
-2. Flood-fill 내부 채우기 → solid polygon
-3. `findContours(RETR_EXTERNAL)` → 가장 큰 윤곽
-4. `_simplify_contour()` — 이진 탐색 면적 오차 2% 이내 최소 꼭짓점
+마스크 있을 때 (`_polygon_from_mask`):
+1. `MORPH_CLOSE` (≈`min(h,w)//10`px, 1회) — 흩어진 벽 선을 건물 blob으로 병합
+2. `findContours(RETR_EXTERNAL)` — 외곽만 추출(내부 방 구멍 자동 무시)
+3. **가장 큰 contour** 채택 → 페이지 테두리 잔여선 등 소면적 노이즈 제외
+4. `_simplify_contour()` — 이진 탐색, 면적 오차 2% 이내 최소 꼭짓점
 
-마스크 없을 때 (OpenCV fallback):
+> flood-fill로 내부를 채우지 않는다. RETR_EXTERNAL이 이미 외곽만 반환하므로
+> 방 구멍을 메울 필요가 없고, 오목한 외곽(사선 컷 등)도 그대로 보존된다.
+
+마스크 없을 때 (OpenCV fallback, `_polygon_from_image`):
 1. `adaptiveThreshold` → 이진화
 2. Morphological close + open
 3. `findContours` → 면적 필터
@@ -82,6 +77,18 @@ pip install transformers
 2. OCR 치수 토큰을 외곽 변에 매칭 → 가중 클러스터 방식
 3. `known_area_m2`로 역산: `scale = sqrt(area_m2 × 1e6 / area_px2)`
 4. 이미지 너비 = 10,000mm 가정
+
+### 변-치수 매칭 (`_match_dims_to_edges`)
+
+폴리곤 변 = 외벽 전체 길이 → 그 변의 mm 길이는 **전체 치수**다.
+한 변 근처에는 전체 치수(예 13000)와 bay 분할 치수(3000/3300/…)가 함께
+배치된다. bay는 변의 부분구간일 뿐이므로 변에 매칭하면 스케일이 틀어진다
+(3300/381px = 8.66 ≠ 정답 34.1).
+
+→ 각 변마다 근처(perp < diag×0.25, 중앙부 t∈[0.2,0.8]) 토큰 중
+**가장 큰 값**(=전체 치수)만 채택한 뒤, 변 길이로 가중 클러스터링.
+도면이미지.png 검증: 13000mm ÷ 381px = **34.12 mm/px**, 면적 207 m²
+(세대 189 + 공용부 18 ≈ 일치).
 
 ## Step 4: pts_mm 정규화
 
@@ -125,7 +132,7 @@ DXF / Blender에 넘기기 전 절대 픽셀 위치 의존성 제거.
 |------|-----------|
 | 기본 (OpenCV fallback) | 0.50 |
 | + OCR 치수 있음 | 0.70 |
-| + 딥러닝 마스크 성공 | 0.85 |
+| + 선 굵기 분리 마스크 성공 | 0.85 |
 | + Vision API 성공 | +0.05 (max 0.95) |
 
 ## 세대 규칙
@@ -148,3 +155,7 @@ DXF / Blender에 넘기기 전 절대 픽셀 위치 의존성 제거.
 |            | Step3: Tesseract OCR 스케일 |
 |            | Step4: pts_mm 정규화 |
 |            | Step5: Vision API 의미 정보만 |
+| 2026.06.12 | **딥러닝 제거** — Step1을 형태학적 선 굵기 분리(Ahmed et al.)로 교체 |
+|            | Step2: closing + RETR_EXTERNAL 가장 큰 contour (flood-fill 제거) |
+|            | Step3: 변마다 '가장 큰 치수'만 채택해 bay 오매칭 방지 |
+|            | 도면이미지.png 검증: 7각형, 34.12 mm/px, 207 m² |

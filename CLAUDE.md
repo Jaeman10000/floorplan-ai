@@ -12,21 +12,26 @@ AI 도면 분석 3D 공간 재설계 플랫폼 (SaaS)
 
 | 도구 | 잘하는 것 | 역할 |
 |------|---------|------|
-| 전용 딥러닝 모델 (CubiCasa5K / DeepFloorplan) | 벽 픽셀 감지 | 외곽/벽체 인식 |
-| OpenCV | 픽셀 좌표 계산, 윤곽선 추출 | 딥러닝 마스크 → 폴리곤 변환 |
+| OpenCV 형태학 연산 | 선 굵기 분리, 픽셀 좌표 계산 | 치수선 제거 → 벽 마스크 → 폴리곤 |
 | Tesseract OCR | 숫자/텍스트 읽기 | 치수 숫자 → 스케일(mm/px) 계산 |
 | Claude Vision API | 의미 이해 | 방 이름, 세대 분류, 공용부 식별 |
+
+> **딥러닝 모델(CubiCasa5K 등)은 제거됨.** 검증된 형태학적 선 굵기 분리
+> (Ahmed et al.)로 대체. 가중치 다운로드·환경 의존성 없음.
 
 ### 파이프라인 (이 순서 절대 변경 금지)
 
 ```
 도면 이미지
     ↓
-[Step 1] 딥러닝 모델 → 벽 픽셀 마스크 생성
+[Step 0] 도면 영역 자동 크롭 (용지 테두리·제목란 제거)
     ↓
-[Step 2] OpenCV → 마스크에서 외곽 폴리곤 추출 → pts_px
+[Step 1] 형태학적 선 굵기 분리 (opening) → 치수선 제거 → 벽 마스크
+    ↓
+[Step 2] OpenCV closing + RETR_EXTERNAL 가장 큰 contour → pts_px
     ↓
 [Step 3] Tesseract OCR → 치수 숫자 읽기 → scale_mm_per_px 계산
+         (변마다 '가장 큰 치수'만 채택 → bay 분할 치수 오매칭 방지)
     ↓
 [Step 4] pts_px × scale = pts_mm (정확한 mm 좌표)
     ↓
@@ -38,7 +43,8 @@ ExtractionResult 반환
 ### 왜 이 구조인가
 - OpenCV만으로는 외벽/치수선/테두리 구분 불가 (검증된 사실)
 - Vision API만으로는 픽셀 좌표 정확도 부족 (검증된 사실)
-- 딥러닝 모델이 "여기가 벽"을 픽셀 단위로 정확히 출력 → OpenCV가 좌표 계산
+- **외벽/벽체는 치수선보다 두껍다** → opening으로 얇은 치수선 제거 (Ahmed et al.)
+- 한국 CAD 이중선은 외벽/내벽 모두 1-5px → Step 2 closing이 건물 형태 책임
 - Vision API는 의미 이해만 담당 (텍스트, 세대 분류)
 
 ### 절대 하지 말 것
@@ -51,7 +57,7 @@ ExtractionResult 반환
 ```
 backend/
   server.py          — FastAPI 메인 서버
-  extractor.py       — 도면 분석 엔진 (딥러닝+OpenCV+OCR+Vision API)
+  extractor.py       — 도면 분석 엔진 (OpenCV 선굵기분리+OCR+Vision API)
   dxf_builder.py     — pts_mm → DXF 변환
   blender_builder.py — pts_mm + rooms → Blender 스크립트
   outline.py         — 외곽 좌표 관리 (절대 변경 금지)
@@ -94,8 +100,9 @@ git push origin main   # 작업 완료 후
 | POST | /api/interior | 🔲 | 인테리어 스타일 (미구현) |
 
 ## 다음 작업
-- [ ] extractor.py Step 1: CubiCasa5K 딥러닝 모델 통합
-- [ ] extractor.py Step 2~4: 마스크→폴리곤→스케일 계산
-- [ ] extractor.py Step 5: Vision API 의미 이해만 담당
-- [ ] 전체 파이프라인 테스트
+- [x] extractor.py Step 1: 형태학적 선 굵기 분리 (Ahmed et al., 딥러닝 제거)
+- [x] extractor.py Step 2: closing + RETR_EXTERNAL 가장 큰 contour
+- [x] extractor.py Step 3: 변별 최대 치수 매칭 (도면이미지.png 34.12 mm/px 검증)
+- [x] 전체 파이프라인 테스트 (7각형, 207 m² — 세대 합계와 일치)
+- [ ] 다양한 도면 샘플로 일반화 검증 (현재 도면이미지.png 1건만 검증)
 - [ ] Railway 배포 확인
