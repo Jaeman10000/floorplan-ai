@@ -11,3 +11,8 @@ ezdxf>=1.1
 httpx>=0.25.0
 python-dotenv>=1.0
 
+# Step 1: 딥러닝 벽 감지 (선택 설치 — 없어도 OpenCV fallback 동작)
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.35.0
+huggingface_hub>=0.19.0

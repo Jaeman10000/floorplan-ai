@@ -2,105 +2,149 @@
 
 ## 핵심 원칙
 
+각 도구는 **잘하는 것만** 담당한다. 역할 혼용 금지.
+
+| 도구 | 역할 |
+|------|------|
+| CubiCasa5K / HuggingFace | 벽 픽셀 마스크 생성 (의미 이해) |
+| OpenCV | 마스크 → 폴리곤 좌표 계산 (수치 계산) |
+| Tesseract OCR | 치수 숫자 읽기 → mm/px 스케일 (숫자 읽기) |
+| Claude Vision API | 방 이름 / 세대 분류 / 공용부 (의미 이해) |
+
+## 파이프라인
+
 ```
-Vision API  →  외벽 픽셀 좌표 직접 추적 + 치수선으로 스케일 계산
-코드        →  pts_mm = pts_px × scale_mm_per_px
+도면 이미지
+    ↓
+[Step 1] 딥러닝 → 벽 픽셀 마스크
+    실패 시 → Step 2에서 원본 이미지 직접 사용
+    ↓
+[Step 2] OpenCV → 마스크(or 원본) → 외곽 폴리곤 pts_px
+    ↓
+[Step 3] Tesseract OCR → 치수 숫자 → scale_mm_per_px
+    실패 시 → known_area_m2 역산 → 이미지 폭 가정
+    ↓
+[Step 4] pts_px × scale → pts_mm (좌상단 (0,0) 정규화)
+    ↓
+[Step 5] Vision API → rooms / units / common_areas 의미 정보
+    실패 시 → 빈 목록으로 계속
+    ↓
+ExtractionResult 반환
 ```
 
-치수선 숫자는 **스케일 계산에만** 사용한다. 좌표 계산에 절대 사용하지 않는다.
+## Step 1: 딥러닝 벽 마스크
 
-## Vision API 역할
+### CubiCasa5K (우선 시도)
 
-### 할 일 1: 외벽 꼭짓점 픽셀 좌표 추적
+```bash
+pip install floortrans  # 또는 pip install cubicasa5k
+```
 
-1. 건물 최외곽 벽체선(가장 굵은 이중선)을 찾는다
-2. 좌상단 꼭짓점부터 시계방향으로 모든 꼭짓점을 추적한다
-3. 각 꼭짓점의 픽셀 좌표 `[x, y]`를 읽는다 (이미지 좌상단이 `[0, 0]`)
-4. 꼭짓점은 벽선이 꺾이는 지점만 — 직선 중간점 포함 금지
-5. 세대 구분선·대지 경계선이 아닌 건물 외벽만
+환경 변수:
+- `CUBICASA5K_WEIGHTS` — 로컬 가중치 파일 경로
+- `CUBICASA5K_HF_REPO` — HuggingFace 저장소 (기본: `CubiCasa/CubiCasa5K`)
 
-### 할 일 2: 스케일 계산
+가중치 없으면 `huggingface_hub.hf_hub_download()`로 자동 다운로드.  
+출력: 클래스 2(wall) 픽셀을 255로 마스킹한 그레이스케일 이미지.
 
-6. 치수선(화살표+숫자) 하나를 찾는다 (긴 것 우선)
-7. 치수선 양 끝 픽셀 거리를 측정한다
-8. `scale_mm_per_px = 치수_숫자(mm) / 픽셀_거리`
+### HuggingFace SegFormer (차선)
 
-### 응답 JSON
+```bash
+pip install transformers
+```
 
+환경 변수:
+- `FLOORPLAN_DL_MODEL` — HuggingFace 모델 ID (미설정 시 이 단계 건너뜀)
+
+```
+예: FLOORPLAN_DL_MODEL=nvidia/segformer-b2-finetuned-ade-512-512
+```
+
+`id2label`에서 "wall" 포함 클래스 자동 탐색 → 없으면 ADE20K class 0 사용.
+
+## Step 2: OpenCV 폴리곤
+
+마스크 있을 때:
+1. `MORPH_CLOSE` (7×7, 4회) — 벽 픽셀 연결
+2. Flood-fill 내부 채우기 → solid polygon
+3. `findContours(RETR_EXTERNAL)` → 가장 큰 윤곽
+4. `_simplify_contour()` — 이진 탐색 면적 오차 2% 이내 최소 꼭짓점
+
+마스크 없을 때 (OpenCV fallback):
+1. `adaptiveThreshold` → 이진화
+2. Morphological close + open
+3. `findContours` → 면적 필터
+
+## Step 3: Tesseract OCR 스케일
+
+스케일 결정 우선순위:
+1. `scale_hint_mm_per_px` 파라미터 (직접 지정)
+2. OCR 치수 토큰을 외곽 변에 매칭 → 가중 클러스터 방식
+3. `known_area_m2`로 역산: `scale = sqrt(area_m2 × 1e6 / area_px2)`
+4. 이미지 너비 = 10,000mm 가정
+
+## Step 4: pts_mm 정규화
+
+```python
+raw_mm = [(x * scale, y * scale) for x, y in pts_px]
+min_x = min(p[0] for p in raw_mm)
+min_y = min(p[1] for p in raw_mm)
+pts_mm = [(x - min_x, y - min_y) for x, y in raw_mm]
+# → P0 근처가 항상 (0,0) 기준
+```
+
+DXF / Blender에 넘기기 전 절대 픽셀 위치 의존성 제거.
+
+## Step 5: Vision API 의미 정보
+
+**Vision API에게 시키는 것:**
+- 방 이름 읽기 (거실, 침실, 욕실, 주방 등)
+- 세대 분류 (A/B/C, 면적 m²)
+- 공용부 이름 (계단실, 엘리베이터홀, 복도)
+
+**Vision API에게 절대 시키지 않는 것:**
+- 좌표 추정
+- 치수선 계산
+- 픽셀 측정
+
+응답 JSON 예시:
 ```json
 {
-  "pts_px": [[120, 85], [780, 85], [780, 620], [650, 750], [120, 750]],
-  "scale_mm_per_px": 18.5,
-  "scale_ref": {"dim_mm": 13000, "px_dist": 703},
   "units": [
-    {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "욕실", "주방"]},
-    {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
-    {"name": "C", "area_m2": 64.00, "rooms": ["거실", "침실", "침실", "욕실", "주방"]}
+    {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "욕실", "주방"]}
   ],
   "common_areas": ["계단실", "엘리베이터홀"],
   "common_area_m2": 18.41,
-  "confidence": 0.85,
-  "warnings": []
+  "confidence": 0.9
 }
 ```
 
-## 코드 처리 로직
+## Confidence 산정
 
-```python
-pts_px = data["pts_px"]                        # Vision이 읽은 픽셀 좌표
-scale  = data["scale_mm_per_px"]               # Vision이 계산한 스케일
-pts_mm = [(x * scale, y * scale) for x, y in pts_px]
-area_m2 = shoelace(pts_mm) / 1e6
-```
-
-별도 좌표 계산 없음. 폐합 검증도 없음 — 픽셀 좌표가 직접 다각형을 구성한다.
-
-## 구 방식과의 차이
-
-| 항목 | 구 방식 (outline 배열) | 신 방식 (픽셀 좌표 추적) |
-|------|----------------------|------------------------|
-| Vision 입력 | 치수선 숫자 목록 | 외벽 픽셀 좌표 목록 |
-| 오류 원인 | 합계/개별 치수 혼동 | 픽셀 위치 오인식 |
-| 코드 계산 | outline_to_polygon() | pts_px × scale |
-| 폐합 검증 | 필요 | 불필요 |
-| 사선 처리 | dx/dy 수동 입력 | 자동 (픽셀 좌표로 표현됨) |
+| 조건 | confidence |
+|------|-----------|
+| 기본 (OpenCV fallback) | 0.50 |
+| + OCR 치수 있음 | 0.70 |
+| + 딥러닝 마스크 성공 | 0.85 |
+| + Vision API 성공 | +0.05 (max 0.95) |
 
 ## 세대 규칙
 
 - 반드시 3개 (A, B, C)
-- 면적 30m² 미만은 세대 분류 금지
-- 18m² 이하는 절대 세대(units)에 포함 금지
-- 공용부(계단실/엘리베이터/복도)는 common_areas로만 처리
-
-## OpenCV Fallback
-
-ANTHROPIC_API_KEY 없거나 Vision API가 유효한 결과를 반환하지 못할 때:
-
-- Vision이 `None`을 반환하는 조건: `pts_px` 없음, `scale_mm_per_px <= 0`, 꼭짓점 3개 미만
-- OpenCV로 외곽선 추출 (대략적)
-- Tesseract OCR로 치수 숫자 읽어 스케일 추정
-- confidence: 0.4 (낮음 표시)
-
-## 한계
-
-- Vision이 외벽을 세대 구분선으로 오인하면 잘못된 다각형 생성
-- 저해상도 이미지에서 픽셀 위치 오차 발생 가능
-- 치수선이 없는 도면은 스케일 계산 불가 (OpenCV fallback)
+- 30m² 미만 세대 분류 금지
+- 공용부(계단실·엘리베이터·복도)는 common_areas로만
 
 ## 변경 이력
 
 | 날짜       | 내용 |
 |------------|------|
 | 2026.06.10 | OpenCV 픽셀 추출 방식으로 시작 |
-| 2026.06.10 | Claude Vision API 통합 (픽셀 좌표 추정) |
-| 2026.06.11 | Vision 역할 재설계 — 좌표 추정 → 치수 읽기만 |
-| 2026.06.11 | 4면 치수 → build_pentagon() 구조 확정 |
-| 2026.06.11 | top_dims+left_dims+has_diagonal 구조로 단순화 |
-| 2026.06.11 | building_height_mm 추가 — left_dims 합계 검증 + 자동 보정 |
-| 2026.06.12 | outline 배열 구조로 완전 재설계 — 어떤 형태든 지원 |
-|            | build_pentagon() 제거 → outline_to_polygon() 도입 |
-|            | top_dims/left_dims/has_diagonal 완전 제거 |
-| 2026.06.12 | 픽셀 좌표 직접 추적 방식으로 재설계 |
-|            | outline 배열·outline_to_polygon() 완전 제거 |
-|            | Vision: 치수 읽기 → 외벽 픽셀 좌표 추적 + 스케일 계산 |
-|            | pts_mm = pts_px × scale_mm_per_px (코드 계산 단순화) |
+| 2026.06.11 | Vision API 통합 (치수 읽기 → 좌표 계산) |
+| 2026.06.12 | outline 배열 구조로 재설계 |
+| 2026.06.12 | Vision API 픽셀 좌표 직접 추적 방식 |
+| 2026.06.12 | **완전 재설계** — 딥러닝+OpenCV+OCR+Vision 역할 분리 |
+|            | Step1: CubiCasa5K/HuggingFace 벽 마스크 |
+|            | Step2: OpenCV 마스크→폴리곤 |
+|            | Step3: Tesseract OCR 스케일 |
+|            | Step4: pts_mm 정규화 |
+|            | Step5: Vision API 의미 정보만 |
