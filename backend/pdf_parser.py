@@ -56,6 +56,11 @@ _RASTER_SCALE = 8.0              # pt → px (1px ≈ 0.125pt ≈ 4.4mm @ 1/100)
 _WALL_CLOSE_PT = 8.0             # 벽 strip 간격 메우기 closing 커널(pt)
 _OUTLINE_EPS_PT = 2.0            # 외곽 단순화 허용오차(pt ≈ 70mm @ 1/100)
 
+# 방 구획(planar subdivision) 파라미터
+_ROOM_MIN_AREA_M2 = 1.0          # 이 면적 미만 자유공간은 방으로 안 침(틈/노이즈)
+_ROOM_EPS_PT = 1.5               # 방 폴리곤 단순화 허용오차(pt)
+_ROOM_OPEN_PX = 5                # 자유공간 잡음 제거 opening 커널(px)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 색/형상 헬퍼
@@ -64,6 +69,18 @@ _OUTLINE_EPS_PT = 2.0            # 외곽 단순화 허용오차(pt ≈ 70mm @ 1
 def _is_black_fill(obj: dict) -> bool:
     """채움색이 검정(또는 스칼라 0)인가."""
     c = obj.get("non_stroking_color")
+    if c is None:
+        return False
+    if isinstance(c, (int, float)):
+        return abs(c) <= _BLACK_TOL
+    if isinstance(c, (list, tuple)) and c:
+        return all(abs(float(v)) <= _BLACK_TOL for v in c)
+    return False
+
+
+def _is_black_stroke(obj: dict) -> bool:
+    """선 색(stroking_color)이 검정(또는 스칼라 0)인가."""
+    c = obj.get("stroking_color")
     if c is None:
         return False
     if isinstance(c, (int, float)):
@@ -169,6 +186,79 @@ def _building_outline_pts_pt(page) -> Optional[List[Tuple[float, float]]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 방 구획 (planar subdivision)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wall_mask_raster(page, sc: float, shape) -> np.ndarray:
+    """
+    벽 마스크(래스터): 채움 벽 curve(외벽+벽체) + 검은 칸막이 선(lw>임계).
+    회색 치수선/그리드선은 검정이 아니므로 자연히 제외된다.
+    """
+    wall = np.zeros(shape, np.uint8)
+    for c in _wall_fill_curves(page):
+        poly = np.array([[int(x * sc), int(y * sc)] for x, y in c["pts"]], np.int32)
+        cv2.fillPoly(wall, [poly], 255)
+    for l in page.lines:
+        lw = float(l.get("linewidth") or 0)
+        if lw <= _THIN_WALL_LW or not _is_black_stroke(l):
+            continue
+        cv2.line(
+            wall,
+            (int(l["x0"] * sc), int(l["top"] * sc)),
+            (int(l["x1"] * sc), int(l["bottom"] * sc)),
+            255, thickness=max(2, int(lw * sc)),
+        )
+    return wall
+
+
+def _extract_rooms_pt(page, outline_pt: List[Tuple[float, float]]) -> List[dict]:
+    """
+    벽 선들의 planar subdivision으로 건물 내부를 방 단위로 분리.
+    방 = (건물 내부 마스크) − (벽 마스크)의 연결요소.
+
+    반환: [{contour_pt: [(x,y)...], area_m2_px: float}, ...] (PDF pt, y-down)
+    area_m2_px 는 픽셀 개수 기반 실제 면적(단순화 폴리곤보다 정확).
+    ⚠️ 문 개구부에서 벽이 끊기면 인접 공간이 한 방으로 병합될 수 있다(v1 한계).
+    """
+    W, H = float(page.width), float(page.height)
+    sc = _RASTER_SCALE
+    shape = (int(H * sc) + 1, int(W * sc) + 1)
+
+    wall = _wall_mask_raster(page, sc, shape)
+    bmask = np.zeros(shape, np.uint8)
+    bpoly = np.array([[int(x * sc), int(y * sc)] for x, y in outline_pt], np.int32)
+    cv2.fillPoly(bmask, [bpoly], 255)
+
+    free = cv2.bitwise_and(bmask, cv2.bitwise_not(wall))
+    if _ROOM_OPEN_PX > 0:
+        free = cv2.morphologyEx(
+            free, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (_ROOM_OPEN_PX, _ROOM_OPEN_PX)),
+        )
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(free, 4)
+    px_to_m2 = (1.0 / (sc * sc))  # px² → pt²;  pt²→m² 은 호출측에서 s² 곱
+
+    rooms = []
+    eps = _ROOM_EPS_PT * sc
+    for i in range(1, n):
+        area_px = float(stats[i, cv2.CC_STAT_AREA])
+        comp = (labels == i).astype(np.uint8) * 255
+        cnts, _h = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        c = max(cnts, key=cv2.contourArea)
+        approx = cv2.approxPolyDP(c, eps, True)
+        if len(approx) < 3:
+            continue
+        rooms.append({
+            "contour_pt": [(float(p[0][0]) / sc, float(p[0][1]) / sc) for p in approx],
+            "area_pt2": area_px * px_to_m2,
+        })
+    return rooms
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 벽 (선 기반)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -225,7 +315,9 @@ def parse_pdf(path: str, page_index: int = 0) -> Dict[str, Any]:
       building_outline_mm: [(x,y),...]  좌상단 (0,0) 정규화, y-down, mm
       outline_area_m2   : float
       walls             : [{p0:[x,y], p1:[x,y], linewidth, length_mm, orient}, ...] mm
-      rooms             : []   # 미구현(내부 라벨이 벡터라 이름 매핑 불가)
+      rooms             : [{id, name(None), polygon_mm:[(x,y)...], area_m2}, ...]
+                          벽 planar subdivision으로 나눈 방. 면적 내림차순 id.
+                          name은 미정(내부 라벨이 벡터라 OCR 필요).
       title_text        : [str, ...]  제목란 등 실제 텍스트
       page_size_pt      : [w, h]
       warnings          : [str, ...]
@@ -274,11 +366,25 @@ def parse_pdf(path: str, page_index: int = 0) -> Dict[str, Any]:
             "orient": w["orient"],
         })
 
+    # 방 구획 (planar subdivision) — 같은 정규화 적용, 면적순 id 부여
+    rooms = []
+    for rm in sorted(_extract_rooms_pt(page, outline_pt),
+                     key=lambda r: r["area_pt2"], reverse=True):
+        a_m2 = rm["area_pt2"] * s * s / 1e6
+        if a_m2 < _ROOM_MIN_AREA_M2:
+            continue
+        poly = [(round(x * s - min_x, 1), round(y * s - min_y, 1))
+                for x, y in rm["contour_pt"]]
+        rooms.append({
+            "id": len(rooms),
+            "name": None,                  # 미정 — 추후 OCR로 채움
+            "polygon_mm": poly,
+            "area_m2": round(a_m2, 2),
+        })
+
     title_text = _title_block_text(page)
 
     # 내부 라벨이 벡터인지 점검: 외곽 bbox 안의 실제 char 수
-    bx0 = min(x for x, _ in outline_pt); bx1 = max(x for x, _ in outline_pt)
-    by0 = min(y for _, y in outline_pt); by1 = max(y for _, y in outline_pt)
     inside_chars = sum(
         1 for c in page.chars
         if bx0 < (c["x0"] + c["x1"]) / 2 < bx1 and by0 < (c["top"] + c["bottom"]) / 2 < by1
@@ -296,7 +402,7 @@ def parse_pdf(path: str, page_index: int = 0) -> Dict[str, Any]:
         "building_outline_mm": outline_mm,
         "outline_area_m2": area_m2,
         "walls": walls,
-        "rooms": [],  # 미구현
+        "rooms": rooms,
         "title_text": title_text,
         "page_size_pt": [round(float(page.width), 1), round(float(page.height), 1)],
         "warnings": warnings,
@@ -312,6 +418,10 @@ if __name__ == "__main__":
     r_print["building_outline_mm"] = f"{len(r['building_outline_mm'])}점"
     r_print["walls"] = f"{len(r['walls'])}개"
     r_print["title_text"] = f"{len(r['title_text'])}줄"
+    r_print["rooms"] = f"{len(r['rooms'])}개"
     print(json.dumps(r_print, ensure_ascii=False, indent=2))
+    print("\n방별 면적:")
+    for rm in r["rooms"]:
+        print(f"  room{rm['id']}: {rm['area_m2']} m²  ({len(rm['polygon_mm'])}각형)")
     print("\n외곽 mm:", r["building_outline_mm"])
     print("면적:", r["outline_area_m2"], "m²")
