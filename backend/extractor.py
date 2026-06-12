@@ -61,49 +61,44 @@ class ExtractionResult:
 # 건물 외곽 폴리곤 계산 (코드가 모든 계산 담당)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_pentagon(
-    top_dims: list,
-    left_dims: list,
-    has_diagonal: bool = False,
-    diag_dx: float = 0.0,
-    diag_dy: float = 0.0,
-    H_override: Optional[float] = None,
+def outline_to_polygon(
+    outline: list,
 ) -> Tuple[List[Tuple[float, float]], dict]:
     """
-    상단·좌측 치수 합산 + 우하단 사선 크기 → 건물 외곽 폴리곤.
+    외곽 선분 배열 → 폴리곤 꼭짓점 리스트.
 
-    has_diagonal=False → 직사각형 4꼭짓점:
-      P0=(0,0)  P1=(W,0)  P2=(W,H)  P3=(0,H)
+    (0, 0)에서 시작해 시계방향으로 각 선분을 누적한다.
+    마지막 점(시작점 복귀)은 제거해 N개 꼭짓점을 반환한다.
 
-    has_diagonal=True  → 우하단 삼각형 잘린 오각형 5꼭짓점:
-      P0=(0,0)  P1=(W,0)  P2=(W, H-diag_dy)  P3=(W-diag_dx, H)  P4=(0,H)
-
-    diag_dx: 사선의 가로 길이 (양수, 우→좌 방향)
-    diag_dy: 사선의 세로 길이 (양수, 하→상 방향)
-    H_override: 세로 총 치수 보정값 (None이면 sum(left_dims) 사용)
+    선분 형식:
+      직선: {"direction": "right"|"left"|"up"|"down", "length_mm": float}
+      사선: {"direction": "diagonal", "dx": float, "dy": float}
+        dx 양수=오른쪽, 음수=왼쪽 / dy 양수=아래, 음수=위
     """
-    W = sum(float(v) for v in top_dims)
-    H = H_override if H_override is not None else sum(float(v) for v in left_dims)
+    x, y = 0.0, 0.0
+    pts: List[Tuple[float, float]] = [(x, y)]
 
-    if has_diagonal and (diag_dx > 0 or diag_dy > 0):
-        pts = [
-            (0.0,          0.0),
-            (W,            0.0),
-            (W,            H - diag_dy),
-            (W - diag_dx,  H),
-            (0.0,          H),
-        ]
-    else:
-        pts = [
-            (0.0, 0.0),
-            (W,   0.0),
-            (W,   H),
-            (0.0, H),
-        ]
+    for seg in outline:
+        d = seg.get("direction", "")
+        if d == "right":
+            x += float(seg.get("length_mm", 0))
+        elif d == "left":
+            x -= float(seg.get("length_mm", 0))
+        elif d == "down":
+            y += float(seg.get("length_mm", 0))
+        elif d == "up":
+            y -= float(seg.get("length_mm", 0))
+        elif d == "diagonal":
+            x += float(seg.get("dx", 0))
+            y += float(seg.get("dy", 0))
+        pts.append((x, y))
 
-    stats = {"W": W, "H": H, "diag_dx": diag_dx, "diag_dy": diag_dy,
-             "has_diagonal": has_diagonal}
-    return pts, stats
+    closure_err = math.hypot(x, y)
+    stats = {
+        "closure_error_mm": closure_err,
+        "vertex_count": len(pts) - 1,
+    }
+    return pts[:-1], stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,37 +138,41 @@ def extract_outline(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _VISION_PROMPT = """\
-이 건축 도면 이미지에서 치수선 숫자를 읽어 JSON으로만 반환하라.
+이 건축 도면 이미지에서 건물 외곽 정보를 읽어 JSON으로만 반환하라.
 JSON 외 다른 텍스트는 절대 포함하지 마라.
-계산하지 말 것. 도면에 인쇄된 숫자만 그대로 읽어라.
+계산하지 말 것. 도면에 인쇄된 치수선 숫자만 그대로 읽어라.
+
+[outline — 건물 외곽 선분 목록]
+좌상단 꼭짓점에서 시계방향으로 한 바퀴 돌면서 각 변을 순서대로 기재한다.
+
+• 직선 변: {"direction": "right"|"left"|"up"|"down", "length_mm": 정수}
+• 사선 변: {"direction": "diagonal", "dx": 정수, "dy": 정수}
+  dx 양수=오른쪽, 음수=왼쪽 / dy 양수=아래, 음수=위 (부호 정확히 기재)
+
+outline 작성 규칙:
+1. 좌상단 꼭짓점에서 시작, 시계방향으로 진행
+2. 모든 변을 빠짐없이 기재 — 마지막 변 끝이 시작점으로 정확히 돌아와야 함
+3. 건물 외벽 치수선만 — 대지 경계선·세대 구분선은 무시
+4. 치수선에 적힌 숫자 그대로 (계산·보정 금지)
+5. 방 면적(59.76 등 소수)을 length_mm에 넣지 말 것
 
 [읽어야 할 항목]
-• top_dims    : 건물 상단 외벽의 치수 숫자, 왼→오른 순서, mm 정수
-• left_dims   : 건물 좌측 외벽의 치수 숫자, 위→아래 순서, mm 정수 (개별 구간 치수만, 전체 합계 치수는 제외)
-• building_height_mm: 건물 좌측 외벽 전체 높이를 나타내는 치수 (left_dims 구간들의 합계로 표시된 총 치수, mm 정수, 없으면 0)
-• has_diagonal: 건물 외곽에 사선 벽이 있으면 true, 직사각형이면 false
-• diagonal_horizontal_mm: 사선의 가로 길이 (has_diagonal=true일 때만, mm 정수)
-• diagonal_vertical_mm  : 사선의 세로 길이 (has_diagonal=true일 때만, mm 정수)
+• outline     : 위 규칙에 따른 외곽 선분 배열
 • units       : 세대 이름, 면적(m²), 방 이름 목록
+               (거실·침실이 있고 면적 30m² 이상인 주거 단위만, 18m² 이하 절대 포함 금지)
 • common_areas: 공용부 이름 목록 (계단실, 엘리베이터홀, 복도 등)
 • common_area_m2: 공용부 면적 합계 (없으면 0)
 
-[주의 사항]
-1. right_dims와 bottom_dims는 반환하지 마라.
-2. 상단(top_dims)과 좌측(left_dims) 치수선만 읽는다.
-3. 건물 외벽에 붙은 치수선만 읽는다. 대지 경계선 치수는 무시한다.
-4. 59.76, 65.21 같은 소수점 방 면적은 치수 배열에 넣지 않는다.
-5. 세대(units): 거실·침실이 있고 면적 30m² 이상인 주거 단위만.
-6. 18m² 이하 공간은 절대 units에 포함하지 않는다.
-
-[응답 형식]
+[응답 형식 예시 — 우하단 사선 건물]
 {
-  "top_dims":  [3000, 3300, 3300, 3400],
-  "left_dims": [1300, 2700, 2700, 5200, 2700, 3300, 1400],
-  "building_height_mm": 19300,
-  "has_diagonal": true,
-  "diagonal_horizontal_mm": 3400,
-  "diagonal_vertical_mm":   2900,
+  "outline": [
+    {"direction": "right",    "length_mm": 13000},
+    {"direction": "down",     "length_mm": 16400},
+    {"direction": "diagonal", "dx": -3400, "dy": 2900},
+    {"direction": "diagonal", "dx": -6200, "dy": 0},
+    {"direction": "diagonal", "dx": -3400, "dy": -2900},
+    {"direction": "up",       "length_mm": 16400}
+  ],
   "units": [
     {"name": "A", "area_m2": 59.76, "rooms": ["거실", "침실", "침실", "욕실", "주방"]},
     {"name": "B", "area_m2": 65.21, "rooms": ["거실", "침실", "침실", "침실", "욕실", "주방"]},
@@ -236,60 +235,54 @@ def _extract_with_vision(image_path: str, api_key: str, warnings: list) -> Optio
 
 
 def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
-    """Vision JSON → build_pentagon() 호출 → ExtractionResult"""
+    """Vision JSON → outline_to_polygon() 호출 → ExtractionResult"""
 
-    top_dims  = [float(v) for v in data.get("top_dims",  [])]
-    left_dims = [float(v) for v in data.get("left_dims", [])]
+    outline = data.get("outline", [])
 
-    if not (top_dims and left_dims):
-        warnings.append("치수 데이터 없음 — 좌표 계산 불가")
+    if not outline:
+        warnings.append("outline 데이터 없음 — 좌표 계산 불가")
         pts_mm: List[Tuple[float, float]] = []
-        stats: dict = {}
     else:
-        W = sum(top_dims)
-        H_raw = sum(left_dims)
-        H_override: Optional[float] = None
+        pts_mm, stats = outline_to_polygon(outline)
 
-        # ── left_dims 합계 범위 검증 ──────────────────────────────────────────
-        if W > 0:
-            ratio = H_raw / W
-            if ratio < 0.5:
-                warnings.append(
-                    f"left_dims 합 {H_raw:.0f}mm < 가로 {W:.0f}mm × 0.5 "
-                    f"({ratio:.2f}×) — 세로 치수 누락 의심"
-                )
-            elif ratio > 3.0:
-                warnings.append(
-                    f"left_dims 합 {H_raw:.0f}mm > 가로 {W:.0f}mm × 3 "
-                    f"({ratio:.2f}×) — 세로 치수 중복 의심"
-                )
-
-        # ── 전체 높이 치수로 자동 보정 ────────────────────────────────────────
-        bh = float(data.get("building_height_mm", 0))
-        if bh > 0:
-            diff = abs(H_raw - bh)
-            if diff > bh * 0.05:
-                warnings.append(
-                    f"left_dims 합 {H_raw:.0f}mm ≠ 전체 높이 {bh:.0f}mm "
-                    f"(차이 {diff:.0f}mm, {diff/bh*100:.1f}%) — 전체 높이로 자동 보정"
-                )
-                H_override = bh
-
-        has_diag = bool(data.get("has_diagonal", False))
-        diag_dx  = float(data.get("diagonal_horizontal_mm", 0))
-        diag_dy  = float(data.get("diagonal_vertical_mm",   0))
-        pts_mm, stats = build_pentagon(
-            top_dims, left_dims, has_diag, diag_dx, diag_dy, H_override
-        )
-
-        if has_diag:
+        err = stats["closure_error_mm"]
+        if err > 100:
             warnings.append(
-                f"사선: 가로 {diag_dx:.0f}mm × 세로 {diag_dy:.0f}mm "
-                f"(P2=({stats['W']:.0f},{stats['H']-diag_dy:.0f}) → "
-                f"P3=({stats['W']-diag_dx:.0f},{stats['H']:.0f}))"
+                f"외곽선 미폐합: 오차 {err:.0f}mm — outline 치수 누락 의심"
             )
+        elif err > 10:
+            warnings.append(f"외곽선 폐합 오차 {err:.0f}mm (허용 범위)")
+
+        if len(pts_mm) < 3:
+            warnings.append(f"꼭짓점 {len(pts_mm)}개 — 외곽선 계산 실패")
+            pts_mm = []
+        else:
+            diag_segs = [s for s in outline if s.get("direction") == "diagonal"]
+            if diag_segs:
+                warnings.append(
+                    f"사선 {len(diag_segs)}개 포함 — "
+                    + ", ".join(
+                        f"dx={s.get('dx',0)}/dy={s.get('dy',0)}" for s in diag_segs
+                    )
+                )
 
     area_m2 = _shoelace_area_m2(pts_mm) if pts_mm else 0.0
+
+    # outline에서 고유 치수값 수집
+    dims: List[float] = []
+    for seg in outline:
+        d = seg.get("direction", "")
+        if d in ("right", "left", "up", "down"):
+            v = float(seg.get("length_mm", 0))
+            if v > 0:
+                dims.append(v)
+        elif d == "diagonal":
+            dx = abs(float(seg.get("dx", 0)))
+            dy = abs(float(seg.get("dy", 0)))
+            if dx > 0:
+                dims.append(dx)
+            if dy > 0:
+                dims.append(dy)
 
     # 세대
     units: List[UnitInfo] = []
@@ -318,15 +311,13 @@ def _vision_data_to_result(data: dict, warnings: list) -> ExtractionResult:
 
     warnings.extend(data.get("warnings", []))
 
-    all_dims = top_dims + left_dims
-
     return ExtractionResult(
         pts_px=[],
         pts_mm=pts_mm,
         scale_mm_per_px=1.0,
         area_m2=round(area_m2, 2),
         confidence=float(data.get("confidence", 0.8)),
-        ocr_dimensions=sorted(set(all_dims), reverse=True),
+        ocr_dimensions=sorted(set(dims), reverse=True),
         warnings=warnings,
         units=units,
         common_areas=common_areas,
