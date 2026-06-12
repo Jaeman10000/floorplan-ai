@@ -634,8 +634,8 @@ function renderOutline(panelId, phId, ptsMm, key) {
   // 마우스 컨트롤 (간단 오빗)
   let isDragging = false, isRightDrag = false;
   let prevMouse  = {x:0, y:0};
-  // theta=π: 도면 상단(-Z) 쪽 정면. phi=atan(4/3)≈53°: position=(cx, maxDist*1.5, cz-maxDist*2)
-  let theta = Math.PI, phi = Math.atan(4/3), radius = maxDist * 2.5;
+  // theta=0: 도면 상단(+Z 반대편)이 화면 위. phi=atan(4/3)≈53°: position=(cx, maxDist*1.5, cz+maxDist*2)
+  let theta = 0, phi = Math.atan(4/3), radius = maxDist * 2.5;
   let panX = cx, panZ = cz;
 
   function updateCamera() {
