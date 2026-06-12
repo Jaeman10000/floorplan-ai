@@ -83,9 +83,20 @@ git pull origin main   # 시작 전
 git add . && git commit -m "내용" && git push origin main  # 완료 후
 ```
 
+## 실측 발견 (테스트용.pdf — 도움건축사 오피스텔 평면도)
+- 건물 외곽: 단일 curve 아님. '가장 큰 검은 curve'는 stroke만 된 **대지경계선**.
+  → **채움(fill=True) 검은 벽 strip 수백 개**를 래스터-합집합+외곽 contour로 추출.
+  (shapely 합집합은 strip 미세간격 때문에 실패) → 6점, 221 m² 검증 완료.
+- 스케일: 페이지=A3 + 'SCALE 1/100' → mm = pt × 25.4/72 × 100 = pt × 35.2778 (정확값).
+- ⚠️ **도면 내부 면적/방 라벨이 텍스트가 아니라 벡터 아웃라인(curve).**
+  건물영역 char=0. 실제 텍스트(chars)는 제목란뿐 → 글자좌표→방이름 매핑 불가.
+  방 이름은 OCR 또는 도면 규약 필요.
+- 굵기(linewidth)로는 벽 분류 불가: lw=1.02는 제목란 표, lw=0.84는 해칭 조각.
+
 ## 다음 작업
-- [ ] pdf_parser.py: 벡터 PDF에서 선/글자 좌표 추출
-- [ ] 선 굵기로 외벽/내벽 분류 로직
-- [ ] 방 폴리곤 + 방 이름 매핑
+- [x] pdf_parser.py: 벡터 PDF에서 선/curve/글자 좌표 추출 + 외곽 + 스케일
+- [ ] 방 폴리곤 추출 (벽 선 planar subdivision — 내부 방 구획)
+- [ ] 방 이름 매핑: 내부 라벨이 벡터라 OCR 또는 도면 규약 필요(텍스트 추출 불가)
+- [ ] dxf_parser.py (ezdxf) — DXF 입력 경로
 - [ ] 3D 렌더링에 내부 방 구획 반영
 - [ ] 구조 편집 UI
