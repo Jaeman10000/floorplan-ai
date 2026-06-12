@@ -299,6 +299,12 @@
         <p><strong>클릭하거나 파일을 드래그</strong><br>JPG, PNG, PDF 지원</p>
       </div>
       <input type="file" id="file-input" accept="image/*,.pdf">
+      <div id="pdf-page-wrap" style="display:none; margin-top:10px; align-items:center; gap:8px; font-size:12px; color:#888;">
+        <span>PDF 페이지</span>
+        <input type="number" id="pdf-page" value="3" min="0"
+               style="width:64px; background:#1a1a22; border:1px solid #2a2a35; border-radius:6px; padding:6px 8px; color:#ddd; outline:none;">
+        <span style="color:#555; font-size:10px;">변경 시 재파싱</span>
+      </div>
     </div>
 
     <div id="preview-box">
@@ -324,7 +330,7 @@
         <span class="info-value" id="info-scale">—</span>
       </div>
       <div class="info-row">
-        <span class="info-label">신뢰도</span>
+        <span class="info-label" id="lbl-conf">신뢰도</span>
         <span class="info-value" id="info-conf">—</span>
       </div>
     </div>
@@ -382,6 +388,12 @@ let jobId  = null;
 let ptsMm  = null;
 let areaM2 = null;
 let renderers = {};
+let parsedData = null;   // 벡터 PDF 파싱 결과
+let lastPdfFile = null;  // 페이지 변경 시 재파싱용
+
+function isPdf(file) {
+  return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+}
 
 // ── 서버 상태 확인 ─────────────────────────────────────────────────────────
 async function checkServer() {
@@ -414,6 +426,20 @@ fileIn.addEventListener("change", e => { if (e.target.files[0]) handleFile(e.tar
 
 // ── 파일 처리 + 업로드 ───────────────────────────────────────────────────
 async function handleFile(file) {
+  // 벡터 PDF → 새 파싱 경로 (외곽+내벽+방+이름)
+  if (isPdf(file)) {
+    lastPdfFile = file;
+    document.getElementById("preview-box").style.display = "block";
+    document.getElementById("preview-img").style.display = "none";
+    document.getElementById("file-info").textContent =
+      `${file.name}  ·  ${(file.size/1024).toFixed(0)} KB`;
+    document.getElementById("pdf-page-wrap").style.display = "flex";
+    await parsePdf();
+    return;
+  }
+  document.getElementById("pdf-page-wrap").style.display = "none";
+  document.getElementById("preview-img").style.display = "block";
+
   // 미리보기
   const reader = new FileReader();
   reader.onload = e => {
@@ -467,8 +493,59 @@ async function handleFile(file) {
   }
 }
 
+// ── 벡터 PDF 파싱 → 3D ─────────────────────────────────────────────────────
+async function parsePdf() {
+  if (!lastPdfFile) return;
+  const page = parseInt(document.getElementById("pdf-page").value) || 0;
+  showStatus(`PDF 파싱 중... (페이지 ${page})`, "loading");
+  showProgress(true);
+
+  const form = new FormData();
+  form.append("file", lastPdfFile);
+
+  try {
+    const res = await fetch(`${API}/api/parse-pdf?page_index=${page}`, { method: "POST", body: form });
+    if (!res.ok) { throw new Error((await res.text()).slice(0, 200)); }
+    const data = await res.json();
+
+    parsedData = data;
+    jobId  = data.job_id;
+    ptsMm  = data.building_outline_mm;   // DXF/기존 버튼 호환
+    areaM2 = data.outline_area_m2;
+
+    if (!ptsMm || ptsMm.length < 3) {
+      showStatus("❌ 건물 외곽을 찾지 못했습니다.", "error");
+      showProgress(false);
+      return;
+    }
+
+    const named = data.rooms.filter(r => r.names && r.names.length).length;
+    document.getElementById("info-area").textContent  = `${data.outline_area_m2}m²`;
+    document.getElementById("info-pts").textContent   = `${ptsMm.length}개`;
+    document.getElementById("info-scale").textContent = `${data.scale_mm_per_pt.toFixed(2)} mm/pt`;
+    document.getElementById("lbl-conf").textContent   = "방 / 이름";
+    document.getElementById("info-conf").textContent  = `${data.rooms.length} / ${named}`;
+    document.getElementById("unit-info").style.display = "block";
+
+    ["btn-asis","btn-redesign","btn-dxf"].forEach(id =>
+      document.getElementById(id).disabled = false);
+
+    renderParsed("panel-asis", "ph-asis", data, "asis");
+    showStatus(`✅ 파싱 완료 — 방 ${data.rooms.length}개(이름 ${named}), 외곽 ${data.outline_area_m2}m² · 벽 표현 ${data.wall_repr}`, "ok");
+  } catch (err) {
+    showStatus("❌ PDF 파싱 실패: " + err.message, "error");
+  }
+  showProgress(false);
+}
+
+document.getElementById("pdf-page").addEventListener("change", () => {
+  if (lastPdfFile) parsePdf();
+});
+
 // ── 버튼: 현황 3D ────────────────────────────────────────────────────────
 document.getElementById("btn-asis").addEventListener("click", async () => {
+  // PDF 파싱 데이터가 있으면 그걸로 재렌더
+  if (parsedData) { renderParsed("panel-asis", "ph-asis", parsedData, "asis"); return; }
   if (!jobId || !ptsMm) return;
   showStatus("현황 3D 생성 중...", "loading");
   showProgress(true);
@@ -558,6 +635,187 @@ document.getElementById("prompt-btn").addEventListener("click", async () => {
     showStatus("❌ 스타일 적용 실패", "error");
   }
 });
+
+// ── Three.js: 방 라벨 스프라이트 (CanvasTexture) ───────────────────────────
+function makeLabel(text) {
+  const lines = String(text).split("\n");
+  const fs = 44, pad = 16, lh = fs * 1.25;
+  const meas = document.createElement("canvas").getContext("2d");
+  meas.font = `bold ${fs}px 'Noto Sans KR', sans-serif`;
+  const tw = Math.max(...lines.map(l => meas.measureText(l).width));
+  const cvs = document.createElement("canvas");
+  cvs.width  = Math.ceil(tw) + pad * 2;
+  cvs.height = Math.ceil(lines.length * lh) + pad * 2;
+  const ctx = cvs.getContext("2d");
+  ctx.fillStyle = "rgba(15,15,19,0.72)";
+  roundRect(ctx, 0, 0, cvs.width, cvs.height, 12); ctx.fill();
+  ctx.font = `bold ${fs}px 'Noto Sans KR', sans-serif`;
+  ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  lines.forEach((l, i) => ctx.fillText(l, cvs.width / 2, pad + (i + 0.5) * lh));
+  const tex = new THREE.CanvasTexture(cvs); tex.needsUpdate = true;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  const sc = 0.0022;  // px → world(m)
+  spr.scale.set(cvs.width * sc, cvs.height * sc, 1);
+  return spr;
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function polyCentroid(poly) {
+  let x = 0, y = 0;
+  for (const p of poly) { x += p[0]; y += p[1]; }
+  return [x / poly.length, y / poly.length];
+}
+
+// 방 바닥 색 팔레트 (구분용)
+const ROOM_PALETTE = [
+  0x4f7cb5, 0x5fae6a, 0xc55a5a, 0xd0883a, 0x8a5fb5, 0x3fb0b0,
+  0xc24fa8, 0x9bbf3a, 0xd98aa8, 0x3a8a7a, 0xb09ad0, 0xa87a3a,
+  0xb04a4a, 0x6a8a4a, 0x5a9ad0, 0xc0a040,
+];
+
+// ── Three.js: 벡터 PDF 파싱 결과 렌더 (외곽+내벽+방+이름) ──────────────────
+function renderParsed(panelId, phId, data, key) {
+  const panel = document.getElementById(panelId);
+  document.getElementById(phId).style.display = "none";
+
+  if (renderers[key]) {
+    renderers[key].dispose();
+    const old = panel.querySelector("canvas.three-canvas");
+    if (old) old.remove();
+  }
+
+  const W = panel.clientWidth, H = panel.clientHeight;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.domElement.className = "three-canvas";
+  panel.appendChild(renderer.domElement);
+  renderers[key] = renderer;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f0f13);
+  const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 2000);
+
+  const outline = data.building_outline_mm;
+  const rooms   = data.rooms || [];
+  const wallH   = 2.8;
+
+  // mm 폴리곤 → Shape/Path (도면 X→worldX, 도면 Y→worldZ; rotation.x=π/2)
+  const toV2   = poly => poly.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000));
+  const o3     = outline.map(p => new THREE.Vector3(p[0] / 1000, 0, p[1] / 1000));
+  const cx = o3.reduce((s, p) => s + p.x, 0) / o3.length;
+  const cz = o3.reduce((s, p) => s + p.z, 0) / o3.length;
+  const maxDist = Math.max(...o3.map(p => Math.hypot(p.x - cx, p.z - cz)));
+
+  // 1) 바닥 베이스 (외곽)
+  const baseShape = new THREE.Shape(toV2(outline));
+  const baseMesh = new THREE.Mesh(
+    new THREE.ShapeGeometry(baseShape),
+    new THREE.MeshBasicMaterial({ color: 0x15151c, side: THREE.DoubleSide }));
+  baseMesh.rotation.x = Math.PI / 2;
+  baseMesh.position.y = -0.02;
+  scene.add(baseMesh);
+
+  // 2) 방 구획 — 색 바닥 타일 + 경계선 + 이름 라벨
+  rooms.forEach((rm, i) => {
+    const col = ROOM_PALETTE[i % ROOM_PALETTE.length];
+    const tile = new THREE.Mesh(
+      new THREE.ShapeGeometry(new THREE.Shape(toV2(rm.polygon_mm))),
+      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.55, side: THREE.DoubleSide }));
+    tile.rotation.x = Math.PI / 2;
+    tile.position.y = 0.0;
+    scene.add(tile);
+
+    const ring = [...rm.polygon_mm, rm.polygon_mm[0]].map(p => new THREE.Vector3(p[0] / 1000, 0.015, p[1] / 1000));
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring),
+      new THREE.LineBasicMaterial({ color: col })));
+
+    const c = polyCentroid(rm.polygon_mm);
+    const nm = (rm.names && rm.names.length) ? rm.names.join("·") : (rm.name || "");
+    const txt = nm ? `${nm}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`;
+    const label = makeLabel(txt);
+    label.position.set(c[0] / 1000, 1.4, c[1] / 1000);
+    scene.add(label);
+  });
+
+  // 3) 벽 (구조만) = 외곽 − 방(구멍) 압출 → 가구/설비 자연 제외
+  const wallShape = new THREE.Shape(toV2(outline));
+  rooms.forEach(rm => wallShape.holes.push(new THREE.Path(toV2(rm.polygon_mm))));
+  const wallMesh = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(wallShape, { depth: -wallH, bevelEnabled: false }),
+    new THREE.MeshLambertMaterial({ color: 0xcdd2dc, transparent: true, opacity: 0.5,
+                                    side: THREE.DoubleSide, depthWrite: false }));
+  wallMesh.rotation.x = Math.PI / 2;
+  scene.add(wallMesh);
+
+  // 외곽 라인
+  scene.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([...o3, o3[0]]),
+    new THREE.LineBasicMaterial({ color: 0x1a6cf5 })));
+
+  // 조명
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+  dir.position.set(cx + 5, 12, cz + 5);
+  scene.add(dir);
+
+  // 그리드
+  const span = Math.max(...outline.map(p => p[0])) / 1000 * 1.6;
+  const grid = new THREE.GridHelper(Math.max(span, 4), 24, 0x222228, 0x16161c);
+  grid.position.set(cx, -0.05, cz);
+  scene.add(grid);
+
+  attachOrbit(renderer, camera, cx, cz, maxDist);
+
+  (function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+  })();
+
+  window.addEventListener("resize", () => {
+    const W2 = panel.clientWidth, H2 = panel.clientHeight;
+    camera.aspect = W2 / H2; camera.updateProjectionMatrix();
+    renderer.setSize(W2, H2);
+  });
+}
+
+// ── 공통 오빗 컨트롤 (theta=0 검증 방향 유지) ─────────────────────────────
+function attachOrbit(renderer, camera, cx, cz, maxDist) {
+  let isDragging = false, isRightDrag = false, prevMouse = { x: 0, y: 0 };
+  let theta = 0, phi = Math.atan(4 / 3), radius = maxDist * 2.5;
+  let panX = cx, panZ = cz;
+  function updateCamera() {
+    camera.position.set(
+      panX + radius * Math.sin(phi) * Math.sin(theta),
+      radius * Math.cos(phi),
+      panZ + radius * Math.sin(phi) * Math.cos(theta));
+    camera.lookAt(panX, 0, panZ);
+  }
+  updateCamera();
+  renderer.domElement.addEventListener("mousedown", e => {
+    isDragging = true; isRightDrag = e.button === 2; prevMouse = { x: e.clientX, y: e.clientY };
+  });
+  renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
+  window.addEventListener("mouseup", () => isDragging = false);
+  window.addEventListener("mousemove", e => {
+    if (!isDragging) return;
+    const dx = e.clientX - prevMouse.x, dy = e.clientY - prevMouse.y;
+    prevMouse = { x: e.clientX, y: e.clientY };
+    if (isRightDrag) { panX -= dx * 0.01; panZ -= dy * 0.01; }
+    else { theta -= dx * 0.008; phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, phi - dy * 0.008)); }
+    updateCamera();
+  });
+  renderer.domElement.addEventListener("wheel", e => {
+    radius = Math.max(1, radius + e.deltaY * 0.01); updateCamera();
+  });
+}
 
 // ── Three.js: 외곽선 렌더링 ─────────────────────────────────────────────
 function renderOutline(panelId, phId, ptsMm, key) {

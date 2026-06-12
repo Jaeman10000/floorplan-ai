@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from extractor import extract_outline, result_to_dict
 from dxf_builder import build_dxf_from_result, build_dxf, DXFBuildConfig
 from blender_builder import generate_script, RoomData, BlenderBuildConfig, save_script
+from pdf_parser import parse_pdf
 
 app = FastAPI(title="AI 도면 분석 3D 공간 재설계 플랫폼")
 app.add_middleware(
@@ -55,6 +56,30 @@ async def upload_floorplan(file: UploadFile = File(...), known_area_m2: float = 
     data = result_to_dict(result)
     data["job_id"] = job_id
     data["image_path"] = tmp_path
+    return JSONResponse(data)
+
+
+# ─── 벡터 PDF 파싱 (외곽 + 내벽 + 방 구획 + 방 이름) ────────────────────────
+
+@app.post("/api/parse-pdf")
+async def parse_pdf_endpoint(file: UploadFile = File(...), page_index: int = 0):
+    name = (file.filename or "").lower()
+    if not name.endswith(".pdf"):
+        raise HTTPException(400, "PDF 파일만 업로드 가능합니다.")
+
+    job_id = str(uuid.uuid4())[:8]
+    tmp_path = os.path.join(TMPDIR, f"{job_id}.pdf")
+    with open(tmp_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        data = parse_pdf(tmp_path, page_index=page_index)
+    except Exception as e:
+        raise HTTPException(500, f"PDF 파싱 실패: {str(e)}")
+
+    data["job_id"] = job_id
+    data["pdf_path"] = tmp_path
+    data["page_index"] = page_index
     return JSONResponse(data)
 
 

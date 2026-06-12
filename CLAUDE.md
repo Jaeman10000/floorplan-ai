@@ -109,8 +109,13 @@ git add . && git commit -m "내용" && git push origin main  # 완료 후
       ⚠️ 문 개구부에서 벽이 끊기면 인접 공간이 한 방으로 병합됨(v1 한계)
 - [x] stroke 벽 도면 대응 + 방 이름 텍스트 매칭 — 빌라 page3 30개, 23개 이름매칭
       (villa_rooms_check.py). 테스트용 fill 경로는 무변경 보존.
+- [x] 3D 뷰어 연결 — server.py `POST /api/parse-pdf`(PDF+page_index → 파싱 dict),
+      index.html PDF 업로드→파싱→renderParsed(바닥+외벽+내벽+방색+이름라벨).
+      벽=외곽−방(구멍) 압출(반투명)이라 방 안 가구는 자연 제외. theta=0,
+      Vector3(x/1000,0,y/1000) 유지. 빌라 page3 헤드리스 Chrome 렌더 검증.
 - [ ] 방 병합 개선: 문 개구부 처리(문 심볼 위치로 가상벽 닫기 등)
+- [ ] 방 이름 사용자 직접 수정 UI (자동 매칭 오류·도면 오타 대응 — 예: 안방이
+      "현관"으로 오기된 케이스)
 - [ ] 벡터 라벨 도면(테스트용) 방 이름: OCR 경로
 - [ ] dxf_parser.py (ezdxf) — DXF 입력 경로
-- [ ] 3D 렌더링에 내부 방 구획 반영
 - [ ] 구조 편집 UI
