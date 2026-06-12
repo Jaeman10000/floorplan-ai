@@ -1,10 +1,11 @@
 # extractor.py
 # 파이프라인 (CLAUDE.md 정의):
-# Step 1: 딥러닝 (CubiCasa5K / HuggingFace) → 벽 픽셀 마스크
-# Step 2: OpenCV → 마스크 or 원본 이미지 → 외곽 폴리곤 pts_px
-# Step 3: Tesseract OCR → 치수 숫자 → scale_mm_per_px
-# Step 4: pts_px × scale → pts_mm (좌상단 정규화)
-# Step 5: Claude Vision API → 방 이름 / 세대 / 공용부 식별만
+# Step 0: 도면 영역 자동 크롭 (용지 테두리·제목란 제거)
+# Step 1: 딥러닝 (CubiCasa5K SegFormer) → 벽 픽셀 마스크
+# Step 2: OpenCV → 마스크 or 크롭 이미지 → pts_px (크롭 좌표계)
+# Step 3: Tesseract OCR → 치수 → scale_mm_per_px (크롭 좌표계)
+# Step 4: pts_px (원본 좌표) × scale → pts_mm (0,0 정규화)
+# Step 5: Claude Vision API → 방이름 / 세대 / 공용부 (원본 이미지)
 
 import cv2
 import numpy as np
@@ -72,33 +73,36 @@ def extract_outline(
     if img is None:
         raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
 
-    # ── Step 1: 딥러닝 벽 마스크 ──────────────────────────────────────────
-    mask = _step1_wall_mask(image_path, img, warnings)
+    # ── Step 0: 도면 영역 크롭 ────────────────────────────────────────────
+    img_work, crop_x, crop_y = _step0_crop_floorplan(img, warnings)
 
-    # ── Step 2: 외곽 폴리곤 ───────────────────────────────────────────────
-    pts_px = _step2_polygon(img, mask, epsilon_ratio, min_area_ratio, warnings)
-    if not pts_px:
+    # ── Step 1: 딥러닝 벽 마스크 (크롭 이미지 사용) ───────────────────────
+    mask = _step1_wall_mask(img_work, warnings)
+
+    # ── Step 2: 외곽 폴리곤 (크롭 좌표계) ────────────────────────────────
+    pts_px_crop = _step2_polygon(img_work, mask, epsilon_ratio, min_area_ratio, warnings)
+    if not pts_px_crop:
         raise ValueError("외곽 폴리곤 추출 실패")
 
-    # ── Step 3: OCR 스케일 ────────────────────────────────────────────────
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    dim_tokens = _step3_ocr_tokens(gray, warnings)
-    dimensions  = sorted({t["value"] for t in dim_tokens}, reverse=True)
+    # 크롭 좌표 → 원본 좌표로 변환
+    pts_px = [(x + crop_x, y + crop_y) for x, y in pts_px_crop]
 
-    scale = _resolve_scale(pts_px, dim_tokens, known_area_m2,
-                           scale_hint_mm_per_px, img.shape[1], warnings)
+    # ── Step 3: OCR 스케일 (크롭 이미지 기준 — pts_px_crop과 동일 좌표계) ─
+    gray_work = cv2.cvtColor(img_work, cv2.COLOR_BGR2GRAY)
+    dim_tokens = _step3_ocr_tokens(gray_work, warnings)
+    dimensions = sorted({t["value"] for t in dim_tokens}, reverse=True)
 
-    # ── Step 4: pts_mm (좌상단 정규화) ────────────────────────────────────
+    scale = _resolve_scale(pts_px_crop, dim_tokens, known_area_m2,
+                           scale_hint_mm_per_px, img_work.shape[1], warnings)
+
+    # ── Step 4: pts_mm (원본 좌표 기반, 0,0 정규화) ───────────────────────
     pts_mm = _step4_pts_mm(pts_px, scale)
 
     area_m2 = _shoelace_m2(pts_mm)
 
-    # ── Step 5: Vision API 의미 정보 ──────────────────────────────────────
-    units, common_areas, raw_vision = _step5_vision_semantic(
-        image_path, warnings
-    )
+    # ── Step 5: Vision API 의미 정보 (원본 이미지) ────────────────────────
+    units, common_areas, raw_vision = _step5_vision_semantic(image_path, warnings)
 
-    # confidence: 마스크 있으면 0.85, OCR 있으면 0.7, 기본 0.5
     confidence = 0.5
     if dim_tokens:
         confidence = 0.7
@@ -122,90 +126,164 @@ def extract_outline(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Step 0 — 도면 영역 자동 크롭
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _step0_crop_floorplan(
+    img: np.ndarray, warnings: list
+) -> Tuple[np.ndarray, int, int]:
+    """
+    용지 테두리(흰 여백) + 우측 제목란을 제거하고 순수 평면도 영역만 크롭.
+
+    전략:
+    1. 프로젝션 프로파일: 어두운 픽셀이 있는 행/열 범위 → 콘텐츠 bounding box
+    2. 우측 30% 구간에서 컬럼 밀도 분석 → 제목란 왼쪽 경계 탐지
+    3. 크롭 후 (crop_x, crop_y) 반환 → Step 2 좌표 역변환에 사용
+
+    반환: (cropped_img, crop_x, crop_y)
+    실패 시 원본 이미지와 (0, 0) 반환.
+    """
+    H, W = img.shape[:2]
+    gray   = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    binary = (gray < 220).astype(np.uint8)
+
+    # ── 프로젝션 프로파일: 콘텐츠 경계 ─────────────────────────────────────
+    row_sums = binary.sum(axis=1)
+    col_sums = binary.sum(axis=0)
+
+    active_rows = np.where(row_sums > W * 0.008)[0]
+    active_cols = np.where(col_sums > H * 0.008)[0]
+
+    if len(active_rows) < 10 or len(active_cols) < 10:
+        warnings.append("Step0: 콘텐츠 영역 감지 실패 — 원본 사용")
+        return img, 0, 0
+
+    ry1, ry2 = int(active_rows[0]),  int(active_rows[-1])
+    cx1, cx2 = int(active_cols[0]),  int(active_cols[-1])
+
+    content_w = cx2 - cx1
+    content_h = ry2 - ry1
+
+    # ── 제목란 탐지: 우측 30% 구간의 컬럼 밀도 ────────────────────────────
+    right_start = cx1 + int(content_w * 0.70)
+    density = col_sums[right_start:cx2].astype(float) / H
+    density_thresh = density.max() * 0.35
+
+    title_col_mask = density > density_thresh
+    title_left = cx2  # 제목란 없으면 cx2까지 포함
+    if title_col_mask.any():
+        title_left_local = int(np.argmax(title_col_mask))
+        title_left = right_start + title_left_local
+
+    # ── 최종 크롭 ────────────────────────────────────────────────────────
+    PAD = 8
+    x1 = max(0,    cx1        + PAD)
+    y1 = max(0,    ry1        + PAD)
+    x2 = min(W,    title_left - PAD)
+    y2 = min(H,    ry2        + PAD)
+
+    if (x2 - x1) < W * 0.30 or (y2 - y1) < H * 0.30:
+        warnings.append("Step0: 크롭 영역 너무 작음 — 원본 사용")
+        return img, 0, 0
+
+    cropped = img[y1:y2, x1:x2]
+    removed_title = (title_left < cx2)
+    warnings.append(
+        f"Step0: {W}x{H} → {x2-x1}x{y2-y1} (offset {x1},{y1}"
+        + (f", 제목란 제거 x<{title_left})" if removed_title else ")")
+    )
+    return cropped, x1, y1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Step 1 — 딥러닝 벽 마스크
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _step1_wall_mask(image_path: str, img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
+def _step1_wall_mask(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
     """
-    CubiCasa5K → HuggingFace 순으로 시도.
-    둘 다 실패하면 None 반환 → Step 2에서 원본 이미지로 OpenCV fallback.
+    CubiCasa5K SegFormer → HuggingFace SegFormer 순으로 시도.
+    둘 다 실패하면 None → Step 2에서 OpenCV fallback.
+    입력은 크롭된 이미지(img_work).
     """
     mask = _try_cubicasa5k(img, warnings)
     if mask is not None:
         return mask
 
-    mask = _try_huggingface(image_path, img, warnings)
+    mask = _try_huggingface(img, warnings)
     if mask is not None:
         return mask
 
-    warnings.append("Step1: 딥러닝 모델 없음 — Step2에서 OpenCV 직접 사용")
+    warnings.append("Step1: 딥러닝 모델 없음 — Step2 OpenCV fallback")
     return None
 
 
 def _try_cubicasa5k(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
-    """CubiCasa5K PyTorch 모델로 벽 마스크 생성."""
+    """
+    JessiP23/cubicasa-segformer-v2 (segmentation_models_pytorch + albumentations).
+    Wall class = 1.  가중치는 HuggingFace cache에서 자동 다운로드.
+    CUBICASA5K_WEIGHTS 환경변수로 로컬 경로 지정 가능.
+    """
     try:
         import torch
-        from PIL import Image as PILImage
+        import segmentation_models_pytorch as smp
+        import albumentations as A
+        from albumentations.pytorch import ToTensorV2
+        from huggingface_hub import hf_hub_download
 
-        # floortrans 패키지 (pip install cubicasa5k 또는 pip install floortrans)
-        try:
-            from floortrans.models.architectures import hg_furukawa_original
-            _get_model = hg_furukawa_original
-        except ImportError:
-            from cubicasa5k.models.architectures import hg_furukawa_original
-            _get_model = hg_furukawa_original
-
-        n_classes = 44  # CubiCasa5K 기본값
-        model = _get_model(input_channels=1, output_channels=n_classes)
-
-        # 환경 변수로 가중치 경로 지정, 없으면 HuggingFace hub에서 다운로드
         weights_path = os.environ.get("CUBICASA5K_WEIGHTS", "")
         if not weights_path or not os.path.isfile(weights_path):
-            from huggingface_hub import hf_hub_download
+            repo_id = os.environ.get(
+                "CUBICASA5K_HF_REPO", "JessiP23/cubicasa-segformer-v2"
+            )
             weights_path = hf_hub_download(
-                repo_id=os.environ.get("CUBICASA5K_HF_REPO", "CubiCasa/CubiCasa5K"),
-                filename="model_best_val_loss_var.pkl",
+                repo_id=repo_id, filename="cubicasa_segformer_best.pt"
             )
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        state = torch.load(weights_path, map_location=device)
-        model.load_state_dict(state)
-        model = model.to(device).eval()
+        ck  = torch.load(weights_path, map_location="cpu", weights_only=False)
+        enc = ck.get("encoder_name", "mit_b2")
+        sz  = ck.get("img_size", 640)
+        n   = ck.get("num_classes", 18)
 
-        # 전처리: 그레이스케일 512×512
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
-        inp = cv2.resize(gray, (512, 512)).astype(np.float32) / 255.0
-        tensor = torch.tensor(inp[None, None]).to(device)
+        model = smp.Segformer(encoder_name=enc, classes=n)
+        model.load_state_dict(ck["model_state_dict"])
+        model.eval()
+
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        tf  = A.Compose([A.Resize(sz, sz), A.Normalize(), ToTensorV2()])
+        inp = tf(image=img_rgb)["image"].unsqueeze(0)
 
         with torch.no_grad():
-            out = model(tensor)
+            pred_small = model(inp).argmax(1).squeeze().numpy()
 
-        # rooms 채널: 클래스 2 = wall
-        rooms = out[0].argmax(dim=0).cpu().numpy()  # (512,512)
-        wall_raw = (rooms == 2).astype(np.uint8) * 255
-        wall_mask = cv2.resize(wall_raw, (w, h), interpolation=cv2.INTER_NEAREST)
+        pred = cv2.resize(
+            pred_small.astype(np.uint8),
+            (img.shape[1], img.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        wall_mask = (pred == 1).astype(np.uint8) * 255  # Wall class = 1
 
-        if wall_mask.sum() < img.shape[0] * img.shape[1] * 0.005:
-            warnings.append("CubiCasa5K 벽 마스크 너무 작음 — 결과 무시")
+        min_px = img.shape[0] * img.shape[1] * 0.02  # 최소 2%
+        if wall_mask.sum() / 255 < min_px:
+            warnings.append(
+                f"CubiCasa5K 벽 마스크 부족 ({int(wall_mask.sum()//255)}px < {min_px:.0f}) — 건너뜀"
+            )
             return None
 
-        warnings.append("Step1: CubiCasa5K 모델 사용")
+        warnings.append(f"Step1: CubiCasa5K ({enc}) wall={int(wall_mask.sum()//255)}px")
         return wall_mask
 
-    except ImportError:
-        warnings.append("cubicasa5k/floortrans 미설치 — HuggingFace 시도")
+    except ImportError as e:
+        warnings.append(f"CubiCasa5K 의존성 없음 ({str(e)[:40]}) — HuggingFace 시도")
         return None
     except Exception as e:
         warnings.append(f"CubiCasa5K 실패: {str(e)[:80]}")
         return None
 
 
-def _try_huggingface(image_path: str, img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
+def _try_huggingface(img: np.ndarray, warnings: list) -> Optional[np.ndarray]:
     """
-    HuggingFace 세분화 모델로 벽 마스크 생성.
-    FLOORPLAN_DL_MODEL 환경 변수로 모델 ID 지정 (기본값 없음).
+    HuggingFace SegFormer 세분화 모델.
+    FLOORPLAN_DL_MODEL 환경 변수로 모델 ID 지정 필수 (미설정 시 건너뜀).
     """
     model_id = os.environ.get("FLOORPLAN_DL_MODEL", "")
     if not model_id:
@@ -215,45 +293,41 @@ def _try_huggingface(image_path: str, img: np.ndarray, warnings: list) -> Option
     try:
         import torch
         from PIL import Image as PILImage
-        from transformers import (
-            SegformerImageProcessor,
-            SegformerForSemanticSegmentation,
-        )
+        from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
         image = PILImage.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         processor = SegformerImageProcessor.from_pretrained(model_id)
-        model = SegformerForSemanticSegmentation.from_pretrained(model_id)
+        model     = SegformerForSemanticSegmentation.from_pretrained(model_id)
         model.eval()
 
         inputs = processor(images=image, return_tensors="pt")
         with torch.no_grad():
-            logits = model(**inputs).logits  # (1, C, H/4, W/4)
+            logits = model(**inputs).logits
 
         pred = logits.argmax(dim=1).squeeze().numpy().astype(np.uint8)
         pred_full = cv2.resize(pred, (img.shape[1], img.shape[0]),
                                interpolation=cv2.INTER_NEAREST)
 
-        # 모델 설정에서 wall label 자동 감지
         id2label = getattr(model.config, "id2label", {})
-        wall_ids = [k for k, v in id2label.items()
-                    if "wall" in str(v).lower() or "wall" in str(k).lower()]
+        wall_ids = [k for k, v in id2label.items() if "wall" in str(v).lower()]
         if not wall_ids:
-            wall_ids = [0]  # ADE20K 기본: class 0 = wall
+            wall_ids = [0]
 
         wall_mask = np.isin(pred_full, wall_ids).astype(np.uint8) * 255
 
-        if wall_mask.sum() < img.shape[0] * img.shape[1] * 0.005:
-            warnings.append(f"HuggingFace({model_id}) 벽 마스크 너무 작음")
+        min_px = img.shape[0] * img.shape[1] * 0.02
+        if wall_mask.sum() / 255 < min_px:
+            warnings.append(f"HuggingFace({model_id}) 벽 마스크 부족 — 건너뜀")
             return None
 
-        warnings.append(f"Step1: HuggingFace 모델 사용 ({model_id})")
+        warnings.append(f"Step1: HuggingFace {model_id}")
         return wall_mask
 
     except ImportError:
         warnings.append("transformers 미설치 — 딥러닝 건너뜀")
         return None
     except Exception as e:
-        warnings.append(f"HuggingFace 모델 실패: {str(e)[:80]}")
+        warnings.append(f"HuggingFace 실패: {str(e)[:80]}")
         return None
 
 
