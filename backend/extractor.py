@@ -585,42 +585,97 @@ def result_to_dict(result: ExtractionResult) -> dict:
 # OpenCV 유틸
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.02, max_vertices=24):
+def _simplify_contour(contour, epsilon_ratio=0.01, area_tol=0.03,
+                      min_edge_ratio=0.05, max_vertices=24):
     """
-    이진 탐색으로 '면적 오차 area_tol 이내 + 최소 꼭짓점' 다각형 탐색.
-    오각형/L자형 오목 코너 보존.
+    epsilon을 점진적으로 키우며 '면적 변화 area_tol 이내 + 최소 꼭짓점' 다각형 탐색.
+    이후 둘레 min_edge_ratio 미만의 짧은 변(발코니 돌출 등 작은 노치)을 제거.
+
+    오목 코너(비대칭 V자 등)는 보존한다. approxPolyDP는 직선에서 멀리 벗어난
+    꼭짓점만 남기므로, 한쪽으로 치우친 V자 꼭짓점도 그대로 살아남는다.
     """
     peri = cv2.arcLength(contour, True)
     true_area = cv2.contourArea(contour)
     if peri <= 0 or true_area <= 0:
         return cv2.approxPolyDP(contour, epsilon_ratio * peri, True)
 
-    def fits(eps):
+    # 면적 변화 area_tol 이내인 후보 중 꼭짓점 최소(동률이면 면적 오차 최소)
+    best = None
+    best_key = None
+    for i in range(1, 100):
+        eps = (i * 0.001) * peri
         ap = cv2.approxPolyDP(contour, eps, True)
         if len(ap) < 3:
-            return False, ap
-        return abs(cv2.contourArea(ap) - true_area) / true_area <= area_tol, ap
+            break
+        err = abs(cv2.contourArea(ap) - true_area) / true_area
+        if err <= area_tol:
+            key = (len(ap), err)
+            if best_key is None or key < best_key:
+                best, best_key = ap, key
+    if best is None:
+        best = cv2.approxPolyDP(contour, epsilon_ratio * peri, True)
 
-    lo, hi = peri * 0.0005, peri * 0.05
-    best = cv2.approxPolyDP(contour, lo, True)
+    # 짧은 변(노치) 제거 — 둘레 min_edge_ratio 미만
+    best = _drop_short_edges(best, min_edge_ratio)
 
-    for _ in range(24):
-        mid = (lo + hi) / 2.0
-        ok, ap = fits(mid)
-        if ok:
-            best = ap
-            lo = mid
-        else:
-            hi = mid
-
+    # 안전망: 여전히 과다하면 epsilon 키워 강제 단순화
     if len(best) > max_vertices:
-        for k in (0.01, 0.02, 0.03):
+        for k in (0.02, 0.03, 0.05):
             ap = cv2.approxPolyDP(contour, k * peri, True)
             if len(ap) <= max_vertices:
-                best = ap
+                best = _drop_short_edges(ap, min_edge_ratio)
                 break
 
     return best
+
+
+def _line_intersection(a, b, c, d):
+    """직선 a→b 와 c→d 의 교차점. 거의 평행이면 None."""
+    x1, y1 = a; x2, y2 = b
+    x3, y3 = c; x4, y4 = d
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
+    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
+    return (px, py)
+
+
+def _drop_short_edges(poly, min_edge_ratio):
+    """
+    둘레 min_edge_ratio 미만의 짧은 변을 반복 제거한다.
+    짧은 변 B-C 를 양 옆 변(A-B, C-D)의 연장 교차점 X 하나로 대체:
+    …A-B-C-D… → …A-X-D…  (코너 유지, 노치만 평탄화)
+    교차점이 부적절하면(평행/과도하게 멀면) 두 끝점의 중점으로 collapse.
+    """
+    pts = [(int(p[0][0]), int(p[0][1])) for p in poly]
+
+    while len(pts) > 3:
+        n = len(pts)
+        lens = [
+            math.hypot(pts[(i + 1) % n][0] - pts[i][0],
+                       pts[(i + 1) % n][1] - pts[i][1])
+            for i in range(n)
+        ]
+        peri = sum(lens)
+        i_min = min(range(n), key=lambda i: lens[i])
+        if peri <= 0 or lens[i_min] >= peri * min_edge_ratio:
+            break
+
+        a = pts[(i_min - 1) % n]
+        b = pts[i_min]
+        c = pts[(i_min + 1) % n]
+        d = pts[(i_min + 2) % n]
+
+        x = _line_intersection(a, b, c, d)
+        short_len = lens[i_min]
+        if x is None or math.hypot(x[0] - b[0], x[1] - b[1]) > short_len * 4:
+            x = ((b[0] + c[0]) / 2.0, (b[1] + c[1]) / 2.0)
+
+        pts[i_min] = (int(round(x[0])), int(round(x[1])))
+        del pts[(i_min + 1) % n]
+
+    return np.array([[[px, py]] for px, py in pts], dtype=np.int32)
 
 
 def _configure_tesseract(pytesseract):
