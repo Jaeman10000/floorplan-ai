@@ -506,6 +506,44 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         실제 브라우저: 현관 그리기→면 클릭→이름→고정 잠금 ①잠금 시각(자물쇠/색) ②clear에도 남는지
         ③🔓 해제 ④다용도실 1개 더 ⑤**저장→재진입 유지** ⑥(참고)undo로 잠금 이전 밀면 풀림.
         **오피스텔로도 1회**. 통과 전 미완료.
+- [x] **외곽 스냅샷·잠금 + 무파괴 모드 전환 + 묶기 변경 경고 + 묶기 localStorage**(JJ가 겪은
+      "세대 묶기 갔다 오면 고정 방·벽 사라짐" 해결). ★실제 원인(진단): 저장 안 한 작업(designWalls·
+      designFixedRooms)은 `exitDesignMode`에서 휘발 → `enterDesignMode`의 saved 분기는
+      `unitDesigns[unit]` 있을 때만(=💾 저장 눌렀을 때만) 탐 → 저장 안 하고 모드 오가면 else 분기로
+      빠져 빈 외곽 새로 fetch → 벽·고정방 소멸. (unitDesigns·rooms[i].unit 자체는 모드 전환으로 안
+      지워짐; 휘발하는 건 "현재 세션 미저장 작업".)
+      **규칙2(핵심·무파괴)**: 신규 `autosaveDesign()` — `designWalls.length||designFixedRooms.length`
+        이면 현재 작업을 `unitDesigns[designUnit]`에 자동 보관(buildDesignSnapshot 공용 헬퍼 = 💾와
+        동일 포맷+`roomIds`) + `renderToBe()`(To-Be 항상 동기화). `exitDesignMode` **맨 앞**에서 호출
+        → 모든 종료 경로(모드전환·세대전환·재파싱) 커버. revert는 walls·fixed 둘 다 비운 뒤 delete라
+        autosave 가드 통과 못해 재저장 안 됨. clear는 fixed 보존 → autosave가 고정방만 저장(의도).
+      **규칙1(외곽 스냅샷)**: autosave/saveDesign이 `boundary_mm` 스냅샷 → 재진입 saved 분기가 그
+        스냅샷 외곽 사용. 묶기가 바뀌어도 설계는 자기(진입 시점) 외곽 유지.
+      **규칙3(묶기 변경 경고)**: `unitDesigns[unit].roomIds`(정렬된 방 id 집합) 필드. `enterDesignMode`
+        `const saved`→`let useSaved` 플래그. 현재 묶인 id집합 !== saved.roomIds이면
+        `confirm("구역이 바뀌었습니다. 확인=기존 설계 유지(이전 외곽)/취소=새 외곽으로 다시 시작")`.
+        확인=saved 분기, 취소=`delete unitDesigns[unit]`+`useSaved=false`→else 분기(새 외곽 fetch).
+        안 바뀐 세대는 경고 없음. ★판정은 **방 id 집합 비교**(면적/bbox 아님) — 묶기변경의 근본이
+        방 집합 변경이라 노이즈(외곽추적 정점흔들림) 없고 추가 fetch 불필요.
+      **규칙4(묶기 localStorage)**: 키=`floorplan-units:{file.name}:{file.size}:{page_index}`(다른
+        PDF·페이지 자연 분리). 형식=`{방id:unit}` 맵. ★**방 id 결정성 먼저 검증**(같은 PDF+page 두 번
+        파싱 → id 완전 일치 확인: 빌라 page2 5방·테스트용 page0 20방 모두 일치) → **id 기반 그대로
+        채택**(중심좌표 키 폴백 불필요). `assignUnit` 끝에 `saveUnitsToStorage()`(묶기 변경 자동 저장,
+        전부 해제 시 removeItem). `parsePdf`+`renderParsed` 후 `loadUnitsFromStorage()`로 rooms[i].unit
+        채우고 전 방 applyRoomBaseColor+updateUnitCounts+상태토스트("저장된 세대 묶기 N칸 복원됨").
+        신규 `unitStorageKey`/`saveUnitsToStorage`/`loadUnitsFromStorage`/`currentUnitRoomIds`.
+      ⚠️ **설계 unitDesigns는 디스크 저장 안 함**(묶기만 localStorage) — 새로고침 시 묶기만 복원, 설계는
+        세션/내보내기로 유지(beforeunload 경고 그대로).
+      무수정 확인: 클릭-클릭(mouseup)·snapPoint·undoDesignWall·고정방(setFixMode/lockSelectedFace/
+        ensureLockedWalls)·capture3dPng/exportPlanPdf·planarFaces·recomputeDesignRooms·beforeunload·
+        generateLayout 안 건드림. saveDesign은 buildDesignSnapshot 공용화(roomIds 포함)만.
+      검증: ①(자동) `_verify_autosave.py`(빌라 page3 A세대, 실제 클릭/모드전환) — ①autosave: 벽4+현관
+        고정(💾 안 누름)→세대묶기 모드 갔다 옴→재진입 시 벽4·고정방1·name"현관" 유지 ②경고: A에 방1개
+        추가→재진입 confirm, accept=외곽·벽 그대로/dismiss=unitDesigns.A 삭제+빈 외곽 ③localStorage:
+        저장 키·새로고침+재업로드→8칸 복원+토스트, 에러0. 회귀(_verify_fixedroom/_verify_clickdraw/
+        _verify_genlayout/_verify_export) 전부 통과. ②(JJ 수동·필수) 실제 브라우저: A 묶기→설계(현관
+        고정, 저장 안 함)→묶기 모드 갔다 옴→설계 유지 / 새로고침+같은 PDF 재업로드→묶기 복원+토스트 /
+        세대 경계 바꿔 재진입→경고 confirm 유지·다시시작 둘 다. **오피스텔로도 1회**. 통과 전 미완료.
 - [ ] **세대별 AI 구조 제안 — 고정 방 연결**(다음 증분): generate-layout에 `fixed_rooms` 전달 +
       백엔드 `외곽−고정방` difference로 빈 영역만 AI 배치 → 고정 방 합쳐 반환. 잠긴 방 위 그리기 가드.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)

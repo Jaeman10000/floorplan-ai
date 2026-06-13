@@ -848,7 +848,9 @@ async function parsePdf() {
     updateUnitCounts();
 
     renderParsed("panel-asis", "ph-asis", data, "asis");
-    showStatus(`✅ 파싱 완료 — 방 ${data.rooms.length}개(이름 ${named}), 외곽 ${data.outline_area_m2}m² · 벽 표현 ${data.wall_repr}`, "ok");
+    const restoredUnits = loadUnitsFromStorage();   // 규칙4: 저장된 묶기 복원
+    showStatus(`✅ 파싱 완료 — 방 ${data.rooms.length}개(이름 ${named}), 외곽 ${data.outline_area_m2}m² · 벽 표현 ${data.wall_repr}`
+      + (restoredUnits ? ` · 💾 저장된 세대 묶기 ${restoredUnits}칸 복원됨` : ""), "ok");
   } catch (err) {
     showStatus("❌ PDF 파싱 실패: " + err.message, "error");
   }
@@ -1459,6 +1461,43 @@ function assignUnit(idx) {
   }
   applyRoomBaseColor(idx);
   updateUnitCounts();
+  saveUnitsToStorage();   // 규칙4: 묶기 변경 → localStorage 자동 저장
+}
+
+// ── 세대 묶기 localStorage 저장/복원 (규칙4) ────────────────────────────────
+// 키=파일명+크기+페이지 → 다른 PDF·페이지 자연 분리. 식별자=방 id(재파싱 결정성 검증됨).
+function unitStorageKey() {
+  if (!lastPdfFile) return null;
+  const page = parseInt(document.getElementById("pdf-page").value) || 0;
+  return `floorplan-units:${lastPdfFile.name}:${lastPdfFile.size}:${page}`;
+}
+function saveUnitsToStorage() {
+  const key = unitStorageKey();
+  if (!key || !parsedData) return;
+  const map = {};
+  parsedData.rooms.forEach(r => { if (r.unit) map[r.id] = r.unit; });
+  try {
+    if (Object.keys(map).length) localStorage.setItem(key, JSON.stringify(map));
+    else localStorage.removeItem(key);   // 전부 해제 시 항목 제거
+  } catch (e) { /* 용량/사생활 모드 등 — 조용히 무시 */ }
+}
+// parsePdf+renderParsed 후 호출: 저장된 묶기 있으면 rooms[i].unit 채우고 색·카운트 갱신. 복원 칸수 반환.
+function loadUnitsFromStorage() {
+  const key = unitStorageKey();
+  if (!key || !parsedData) return 0;
+  let map = null;
+  try { map = JSON.parse(localStorage.getItem(key) || "null"); } catch (e) { map = null; }
+  if (!map) return 0;
+  let n = 0;
+  parsedData.rooms.forEach(r => {
+    const u = map[r.id];
+    if (u && UNIT_LABELS[u] !== undefined) { r.unit = u; n++; }
+  });
+  if (n) {
+    parsedData.rooms.forEach((_, i) => applyRoomBaseColor(i));
+    updateUnitCounts();
+  }
+  return n;
 }
 
 function clearUnitHighlight() {
@@ -2042,7 +2081,20 @@ function unlockFixedRoom(i) {
 // ── 진입/이탈/undo ─────────────────────────────────────────────────────────
 async function enterDesignMode(unit) {
   let boundary, loadedWalls = [], loadedNames = [], loadedFixed = [];
-  const saved = unitDesigns[unit];
+  // 규칙3: 저장된 설계가 있는데 묶기(방 id 집합)가 바뀌었으면 경고 → 유지/다시시작 선택
+  let useSaved = !!unitDesigns[unit];
+  if (useSaved) {
+    const curIds = currentUnitRoomIds(unit);
+    const savedIds = unitDesigns[unit].roomIds || [];
+    if (JSON.stringify(curIds) !== JSON.stringify(savedIds)) {
+      const keep = confirm(
+        `${UNIT_LABELS[unit]} 구역(묶기)이 바뀌었습니다.\n\n` +
+        `[확인] 기존 설계 유지 (이전 외곽 그대로)\n` +
+        `[취소] 새 외곽으로 다시 시작 (이 세대 설계 삭제)`);
+      if (!keep) { delete unitDesigns[unit]; useSaved = false; }
+    }
+  }
+  const saved = useSaved ? unitDesigns[unit] : null;
   if (saved) {
     // 저장된 설계 있으면 그 외곽·벽을 불러와 이어 편집 (백엔드 재요청 X — 일관성)
     boundary = saved.boundary_mm.map(p => p.slice());
@@ -2110,6 +2162,7 @@ async function enterDesignMode(unit) {
 }
 
 function exitDesignMode() {
+  autosaveDesign();   // 규칙2: 저장 안 한 작업을 종료 전 자동 보관 (무파괴 모드 전환)
   if (designGroup && roomScene) {
     designGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
     roomScene.remove(designGroup);
@@ -2158,17 +2211,38 @@ function revertDesignToOriginal() {
                       : "빈 외곽 상태입니다 (저장된 구조 없음).", "ok");
 }
 
-// 💾 저장 — 현재 designWalls+방을 이 세대 새 구조(To-Be)로 보관 + To-Be 패널 갱신
-function saveDesign() {
-  if (!designUnit) return;
-  if (!designWalls.length) { showStatus("그린 벽이 없습니다. 먼저 벽을 그어 방을 만드세요.", "error"); return; }
-  unitDesigns[designUnit] = {
+// 현재 세대에 묶인 방 id 집합 (정렬) — 외곽 스냅샷의 "묶기 지문"(규칙3 변경 감지)
+function currentUnitRoomIds(unit) {
+  if (!parsedData) return [];
+  return parsedData.rooms.filter(r => r.unit === unit).map(r => r.id).sort((a, b) => a - b);
+}
+
+// 현재 설계 작업을 unitDesigns 저장 포맷으로 직렬화 (saveDesign·autosaveDesign 공용)
+function buildDesignSnapshot() {
+  return {
     boundary_mm: designBoundary.map(p => p.slice()),
     walls: designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })),
     rooms: designRooms.map(r => ({ poly: r.poly.map(p => p.slice()), area_m2: r.area_m2, color: r.color })),
     roomNames: designRoomNames.map(r => ({ name: r.name, cx: r.cx, cy: r.cy })),
     fixedRooms: designFixedRooms.map(r => ({ name: r.name, poly: r.poly.map(p => p.slice()) })),
+    roomIds: currentUnitRoomIds(designUnit),   // 규칙1·3: 외곽 스냅샷의 묶기 지문
   };
+}
+
+// 무파괴 모드 전환(규칙2): 저장 안 한 작업(벽·고정방)을 종료 전에 자동 보관.
+// 둘 다 없으면 저장 안 함 → revertDesignToOriginal(둘 다 비운 뒤 호출)은 재저장 안 됨.
+function autosaveDesign() {
+  if (!designUnit) return;
+  if (!designWalls.length && !designFixedRooms.length) return;
+  unitDesigns[designUnit] = buildDesignSnapshot();
+  renderToBe();   // To-Be 패널 항상 동기화 (💾 저장과 동일 효과)
+}
+
+// 💾 저장 — 현재 designWalls+방을 이 세대 새 구조(To-Be)로 보관 + To-Be 패널 갱신
+function saveDesign() {
+  if (!designUnit) return;
+  if (!designWalls.length) { showStatus("그린 벽이 없습니다. 먼저 벽을 그어 방을 만드세요.", "error"); return; }
+  unitDesigns[designUnit] = buildDesignSnapshot();
   renderToBe();
   updateDesignActions();
   showStatus(`💾 ${UNIT_LABELS[designUnit]} 새 구조 저장됨 (방 ${designRooms.length}개) — 우측 To-Be에 표시.`, "ok");
