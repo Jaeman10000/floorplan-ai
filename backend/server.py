@@ -200,6 +200,52 @@ async def ai_advice(payload: dict):
     return JSONResponse({"answer": answer, "context": context})
 
 
+@app.post("/api/unit-boundary")
+async def unit_boundary(payload: dict):
+    """세대 방 폴리곤들을 합쳐 '빈 외곽'(봉투) 하나를 반환 — 내부 설계 모드 진입용.
+
+    방 폴리곤은 래스터 추적이라 정점 노이즈가 많고 인접 방끼리 공유 edge가 없다.
+    unary_union 후 buffer(+t).buffer(-t) 모폴로지 close로 내벽 슬릿/미세간격을 메워
+    깨끗한 외곽 ring 하나로 만든다. (그려 넣을 깨끗한 도화지 = 스냅 정확도의 기반)
+    """
+    polys = payload.get("polygons") or []
+    if not polys:
+        raise HTTPException(400, "polygons가 비어 있습니다.")
+
+    from shapely.geometry import Polygon, MultiPolygon
+    from shapely.ops import unary_union
+
+    geoms = []
+    for ring in polys:
+        if not ring or len(ring) < 3:
+            continue
+        try:
+            p = Polygon([(float(x), float(y)) for x, y in ring])
+            if not p.is_valid:
+                p = p.buffer(0)
+            if not p.is_empty and p.area > 0:
+                geoms.append(p)
+        except Exception:
+            continue
+    if not geoms:
+        raise HTTPException(400, "유효한 방 폴리곤이 없습니다.")
+
+    merged = unary_union(geoms)
+    # 모폴로지 close: 내벽 슬릿(보통 100~200mm)·미세간격 메움 + 외곽 계단노이즈 평활
+    closed = merged.buffer(160).buffer(-160)
+    if closed.is_empty:
+        closed = merged
+
+    # 가장 큰 조각만 (세대는 연속 영역)
+    if isinstance(closed, MultiPolygon):
+        closed = max(closed.geoms, key=lambda g: g.area)
+
+    # 그려 넣을 깨끗한 도화지 — 래스터 추적 계단노이즈를 충분히 단순화
+    closed = closed.simplify(120, preserve_topology=True)
+    ring = [[round(x, 1), round(y, 1)] for x, y in closed.exterior.coords[:-1]]
+    return JSONResponse({"boundary_mm": ring, "area_m2": round(closed.area / 1e6, 2)})
+
+
 # ─── 2단계: DXF 변환 ────────────────────────────────────────────────────────
 
 @app.post("/api/convert-dxf")

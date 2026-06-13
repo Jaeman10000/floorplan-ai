@@ -554,6 +554,31 @@
       </div>
     </div>
 
+    <!-- 내부 설계 모드 (빈 외곽에 새로 그리기) -->
+    <div>
+      <div class="section-label">🎨 내부 설계</div>
+      <button class="action-btn btn-secondary" id="btn-design-mode" disabled>내부 설계 모드 시작</button>
+      <div id="design-unit-picker" style="display:none; margin-top:10px;">
+        <div style="font-size:11px; color:#888; margin-bottom:6px;">설계할 세대 (지정된 세대만)</div>
+        <div class="unit-btns">
+          <button class="du-btn eu-btn" data-unit="A">A세대</button>
+          <button class="du-btn eu-btn" data-unit="B">B세대</button>
+          <button class="du-btn eu-btn" data-unit="C">C세대</button>
+          <button class="du-btn eu-btn" data-unit="common">공용</button>
+        </div>
+        <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
+      </div>
+      <div id="design-actions" style="display:none; gap:6px; margin-top:10px;">
+        <button class="btn-secondary" id="btn-undo-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>↩️ 되돌리기</button>
+        <button class="btn-secondary" id="btn-reset-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>빈 외곽으로</button>
+      </div>
+      <div class="edit-hint" id="design-hint" style="display:none;">
+        내벽이 사라진 빈 외곽에 <b>좌클릭 드래그</b>로 벽을 그으세요. 거의 수평/수직이면 직각으로,
+        기존 벽·외곽 근처면 붙어서 그려집니다. 벽으로 닫힌 공간은 자동으로 방이 됩니다.<br>
+        우클릭=카메라 회전 · Ctrl+Z=되돌리기. (원본은 모드 종료 시 복원)
+      </div>
+    </div>
+
     <!-- 방 이름 수정 (방 클릭 시 표시) -->
     <div id="room-edit-section" style="display:none;">
       <div class="section-label" style="margin-bottom:8px;">방 이름 수정</div>
@@ -654,6 +679,24 @@ const EDIT_WALL_SEL = 0xffd24a;     // 선택된 벽 색
 // 세대 스코핑 덕에 완화해도 유령 벽 안 생김. 완화 전(700/3): A세대 5개 → 완화 후(300/2): 8개
 const _WALL_TOL = 80, _WALL_THICK_MIN = 70, _WALL_THICK_MAX = 400;
 const _WALL_MIN_OVERLAP = 300, _WALL_MIN_MEMB = 2, _WALL_MIN_AREA = 1.0e6; // mm²
+
+// 내부 설계 모드 상태 (빈 외곽에 새로 그리기)
+let designMode = false;        // 내부 설계 모드 on/off
+let designUnit = null;         // 설계 대상 세대
+let designBoundary = null;     // 빈 외곽 ring (mm) — 백엔드 shapely union 결과
+let designWalls = [];          // JJ가 그린 벽 선분 [{a:[x,y], b:[x,y]}]
+let designRooms = [];          // 닫힌 면 = 방 [{poly, area_m2, color}]
+let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
+let designDrawing = false;     // 좌클릭 드래그로 벽 그리는 중 (orbit 차단)
+let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm
+let drawPreview = null;        // 미리보기 선 Line
+let drawLenLabel = null;       // 길이 표시 스프라이트
+let designHistory = [];        // undo 스택 (designWalls 깊은복사)
+const _SNAP_MM = 350;          // 정점/선분 스냅 반경 (mm)
+const _ANGLE_DEG = 7;          // 직각 스냅 허용각
+const _DRAW_MIN_MM = 100;      // 이보다 짧은 드래그는 벽으로 안 침
+const _FACE_MIN_AREA = 0.5e6;  // 방으로 인정할 최소 면적 (mm²)
+const _NODE_TOL = 50;          // 평면그래프 노드 병합 허용 (mm)
 
 function isPdf(file) {
   return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
@@ -798,6 +841,7 @@ async function parsePdf() {
     document.getElementById("btn-advice").disabled = false;
     document.getElementById("btn-unit-mode").disabled = false;
     document.getElementById("btn-edit-mode").disabled = false;
+    document.getElementById("btn-design-mode").disabled = false;
     updateUnitCounts();
 
     renderParsed("panel-asis", "ph-asis", data, "asis");
@@ -967,6 +1011,8 @@ function renderParsed(panelId, phId, data, key) {
   wallModel = []; wallPickers = []; selectedWallId = null; wallHighlight = null;
   wallDragging = false; wallExtrudeMesh = null;
   if (key === "asis" && editMode) resetEditUI();  // 재파싱 시 편집 모드 해제
+  if (key === "asis" && designMode) resetDesignUI();  // 재파싱 시 설계 모드 해제
+  designGroup = null; designDrawing = false; drawStart = null; drawPreview = null; drawLenLabel = null;
   document.getElementById("room-edit-section").style.display = "none";
 
   const W = panel.clientWidth, H = panel.clientHeight;
@@ -1084,10 +1130,20 @@ function renderParsed(panelId, phId, data, key) {
       }
     }, true);
 
+    // 내부 설계 모드: 좌클릭 누르면 벽 그리기 시작 (orbit 좌버튼은 designMode에서 비활성)
+    renderer.domElement.addEventListener("mousedown", e => {
+      if (!designMode || e.button !== 0 || !designBoundary) return;
+      drawStart = snapPoint(groundMM(e), null);
+      designDrawing = true;
+      beginDrawPreview();
+      e.stopImmediatePropagation(); e.preventDefault();
+    }, true);
+
     renderer.domElement.addEventListener("mousedown", e => {
       mdPos = { x: e.clientX, y: e.clientY };
     });
     renderer.domElement.addEventListener("mouseup", e => {
+      if (designMode) { mdPos = null; return; }   // 설계 모드는 그리기 핸들러가 전담
       if (!mdPos) return;
       const dx = e.clientX - mdPos.x, dy = e.clientY - mdPos.y;
       mdPos = null;
@@ -1152,12 +1208,13 @@ function attachOrbit(renderer, camera, cx, cz, maxDist) {
   }
   updateCamera();
   renderer.domElement.addEventListener("mousedown", e => {
+    if (designMode && e.button === 0) return;   // 설계 모드: 좌버튼은 그리기 전용(우버튼만 카메라)
     isDragging = true; isRightDrag = e.button === 2; prevMouse = { x: e.clientX, y: e.clientY };
   });
   renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
   window.addEventListener("mouseup", () => isDragging = false);
   window.addEventListener("mousemove", e => {
-    if (wallDragging) return;   // 벽 드래그 중엔 카메라 회전/팬 금지 (드래그-회전 충돌 차단)
+    if (wallDragging || designDrawing) return;  // 벽 드래그/벽 그리기 중엔 카메라 금지 (충돌 차단)
     if (!isDragging) return;
     const dx = e.clientX - prevMouse.x, dy = e.clientY - prevMouse.y;
     prevMouse = { x: e.clientX, y: e.clientY };
@@ -1868,6 +1925,424 @@ window.addEventListener("keydown", e => {
 });
 document.getElementById("btn-undo-edit").addEventListener("click", undoWallMove);
 document.getElementById("btn-reset-edit").addEventListener("click", resetAllEdits);
+
+// ══════════════════════════════════════════════════════════════════════════
+// 내부 설계 모드 — 빈 외곽에 손으로 벽 그리기 → 닫힌 면을 방으로 인식
+// ══════════════════════════════════════════════════════════════════════════
+
+// 포인터 → 바닥평면(y=0) 교차점을 도면 mm로 반환 [x,y]
+function groundMM(e) {
+  const pt = groundPoint(e);
+  return pt ? [pt.x * 1000, pt.z * 1000] : null;
+}
+
+// ── 스냅: 정점 > 선분 > 직각 (연결이 직각보다 우선) ──────────────────────
+function _snapVertices() {
+  const vs = [];
+  if (designBoundary) for (const p of designBoundary) vs.push(p);
+  for (const w of designWalls) { vs.push(w.a); vs.push(w.b); }
+  return vs;
+}
+function _snapSegments() {
+  const segs = [];
+  if (designBoundary) {
+    const b = designBoundary;
+    for (let i = 0; i < b.length; i++) segs.push([b[i], b[(i + 1) % b.length]]);
+  }
+  for (const w of designWalls) segs.push([w.a, w.b]);
+  return segs;
+}
+// 점 p를 선분 ab에 정사영 (+ 선분 위 여부·거리)
+function _projOnSeg(p, a, b) {
+  const vx = b[0] - a[0], vy = b[1] - a[1];
+  const L2 = vx * vx + vy * vy;
+  if (L2 < 1e-6) return { pt: [a[0], a[1]], d: Math.hypot(p[0] - a[0], p[1] - a[1]), t: 0 };
+  let t = ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L2;
+  t = Math.max(0, Math.min(1, t));
+  const q = [a[0] + t * vx, a[1] + t * vy];
+  return { pt: q, d: Math.hypot(p[0] - q[0], p[1] - q[1]), t };
+}
+function snapPoint(raw, from) {
+  if (!raw) return raw;
+  let p = raw.slice();
+  // 3) 직각 스냅 (from 있을 때) — 먼저 직교화한 뒤 정점/선분 스냅으로 덮어씀
+  if (from) {
+    const dx = p[0] - from[0], dy = p[1] - from[1];
+    const ang = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
+    const tol = _ANGLE_DEG;
+    if (Math.abs(ang - 0) < tol || Math.abs(ang - 180) < tol) p = [p[0], from[1]];        // 수평
+    else if (Math.abs(ang - 90) < tol) p = [from[0], p[1]];                                // 수직
+  }
+  // 1) 정점 스냅 (raw 기준) — 연결 최우선
+  let best = null, bd = _SNAP_MM;
+  for (const v of _snapVertices()) {
+    const d = Math.hypot(raw[0] - v[0], raw[1] - v[1]);
+    if (d < bd) { bd = d; best = [v[0], v[1]]; }
+  }
+  if (best) return best;
+  // 2) 선분 스냅 (raw 기준)
+  let bs = null, bsd = _SNAP_MM;
+  for (const [a, b] of _snapSegments()) {
+    const r = _projOnSeg(raw, a, b);
+    if (r.d < bsd) { bsd = r.d; bs = r.pt; }
+  }
+  if (bs) return bs;
+  return p;  // 직각 스냅(또는 raw)
+}
+
+// ── 미리보기 + 길이 라벨 ──────────────────────────────────────────────────
+function beginDrawPreview() {
+  endDrawPreview();
+  if (!drawStart || !designGroup) return;
+  const g = new THREE.BufferGeometry().setFromPoints(
+    [new THREE.Vector3(drawStart[0] / 1000, 0.03, drawStart[1] / 1000),
+     new THREE.Vector3(drawStart[0] / 1000, 0.03, drawStart[1] / 1000)]);
+  drawPreview = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xffd24a, transparent: true, depthTest: false }));
+  drawPreview.renderOrder = 1000;
+  designGroup.add(drawPreview);
+}
+function updateDrawPreview(end) {
+  if (!drawPreview || !drawStart) return;
+  drawPreview.geometry.setFromPoints(
+    [new THREE.Vector3(drawStart[0] / 1000, 0.03, drawStart[1] / 1000),
+     new THREE.Vector3(end[0] / 1000, 0.03, end[1] / 1000)]);
+  const len = Math.hypot(end[0] - drawStart[0], end[1] - drawStart[1]);
+  const mid = [(drawStart[0] + end[0]) / 2, (drawStart[1] + end[1]) / 2];
+  if (drawLenLabel) designGroup.remove(drawLenLabel);
+  drawLenLabel = makeLabel(`${(len / 1000).toFixed(2)}m`);
+  drawLenLabel.position.set(mid[0] / 1000, 0.5, mid[1] / 1000);
+  drawLenLabel.renderOrder = 1001;
+  designGroup.add(drawLenLabel);
+}
+function endDrawPreview() {
+  if (drawPreview && designGroup) { designGroup.remove(drawPreview); drawPreview.geometry.dispose(); drawPreview.material.dispose(); }
+  if (drawLenLabel && designGroup) designGroup.remove(drawLenLabel);
+  drawPreview = null; drawLenLabel = null;
+}
+
+// 그리기 드래그 (window 싱글톤)
+window.addEventListener("mousemove", e => {
+  if (!designDrawing || !drawStart) return;
+  const raw = groundMM(e);
+  if (!raw) return;
+  updateDrawPreview(snapPoint(raw, drawStart));
+});
+window.addEventListener("mouseup", e => {
+  if (!designDrawing) return;
+  designDrawing = false;
+  const raw = groundMM(e);
+  const end = raw ? snapPoint(raw, drawStart) : null;
+  endDrawPreview();
+  if (drawStart && end) {
+    const len = Math.hypot(end[0] - drawStart[0], end[1] - drawStart[1]);
+    if (len >= _DRAW_MIN_MM) {
+      designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+      if (designHistory.length > 50) designHistory.shift();
+      designWalls.push({ a: drawStart.slice(), b: end.slice() });
+      recomputeDesignRooms();
+      renderDesignWalls();
+      renderDesignRooms();
+      updateDesignActions();
+      const nr = designRooms.length;
+      showStatus(`벽 추가 (${(len / 1000).toFixed(2)}m). ${nr ? `닫힌 방 ${nr}개 인식됨.` : "아직 닫힌 방 없음 — 벽이 만나야 방이 닫힙니다."}`, nr ? "ok" : "info");
+    }
+  }
+  drawStart = null;
+});
+
+// ── 평면그래프 면 순회: segments(외곽+벽) → 최소 닫힌 면(방) ────────────────
+function planarFaces(segments) {
+  // 1) 노드 수집 + 병합(_NODE_TOL)
+  const nodes = [];
+  function nodeId(p) {
+    for (let i = 0; i < nodes.length; i++)
+      if (Math.hypot(nodes[i][0] - p[0], nodes[i][1] - p[1]) <= _NODE_TOL) return i;
+    nodes.push([p[0], p[1]]); return nodes.length - 1;
+  }
+  // 원 선분 등록 (끝점 노드화)
+  let segs = segments.map(s => [s[0].slice(), s[1].slice()]);
+  // 2) 선분-선분 X 교차점 분할
+  function inter(p1, p2, p3, p4) {
+    const d = (p2[0]-p1[0])*(p4[1]-p3[1]) - (p2[1]-p1[1])*(p4[0]-p3[0]);
+    if (Math.abs(d) < 1e-9) return null;
+    const t = ((p3[0]-p1[0])*(p4[1]-p3[1]) - (p3[1]-p1[1])*(p4[0]-p3[0])) / d;
+    const u = ((p3[0]-p1[0])*(p2[1]-p1[1]) - (p3[1]-p1[1])*(p2[0]-p1[0])) / d;
+    const eps = 1e-4;
+    if (t > eps && t < 1-eps && u > eps && u < 1-eps)
+      return [p1[0]+t*(p2[0]-p1[0]), p1[1]+t*(p2[1]-p1[1])];
+    return null;
+  }
+  for (let i = 0; i < segs.length; i++)
+    for (let j = i + 1; j < segs.length; j++) {
+      const x = inter(segs[i][0], segs[i][1], segs[j][0], segs[j][1]);
+      if (x) { segs.push([x.slice(), segs[i][1].slice()]); segs[i][1] = x.slice();
+               segs.push([x.slice(), segs[j][1].slice()]); segs[j][1] = x.slice(); }
+    }
+  // 3) 각 선분을 그 위에 얹힌 노드들로 분할 → 인접 edge
+  segs.forEach(s => { nodeId(s[0]); nodeId(s[1]); });
+  const edgeSet = new Set();
+  const adj = nodes.map(() => []);
+  function addEdge(a, b) {
+    if (a === b) return;
+    const k = a < b ? a + "_" + b : b + "_" + a;
+    if (edgeSet.has(k)) return;
+    edgeSet.add(k);
+    adj[a].push(b); adj[b].push(a);
+  }
+  for (const s of segs) {
+    // 이 선분 위(내부 포함)에 있는 노드들을 t 순으로
+    const on = [];
+    for (let n = 0; n < nodes.length; n++) {
+      const r = _projOnSeg(nodes[n], s[0], s[1]);
+      if (r.d <= _NODE_TOL) on.push({ n, t: r.t });
+    }
+    on.sort((p, q) => p.t - q.t);
+    for (let k = 0; k < on.length - 1; k++) addEdge(on[k].n, on[k + 1].n);
+  }
+  // 4) half-edge 면 순회 (도착 노드에서 가장 시계방향 다음 edge)
+  const visited = new Set();
+  const faces = [];
+  function ang(from, to) { return Math.atan2(nodes[to][1] - nodes[from][1], nodes[to][0] - nodes[from][0]); }
+  for (let a = 0; a < nodes.length; a++) for (const b of adj[a]) {
+    if (visited.has(a + "_" + b)) continue;
+    const face = []; let cu = a, cv = b, guard = 0;
+    while (guard++ < 100000) {
+      visited.add(cu + "_" + cv);
+      face.push(cu);
+      // 도착 cv에서, 들어온 방향(cv→cu)의 각 기준 시계방향으로 가장 가까운 나가는 edge
+      const back = ang(cv, cu);
+      let nx = -1, bestDelta = Infinity;
+      for (const w of adj[cv]) {
+        if (w === cu && adj[cv].length > 1) continue;  // 막다른 길이 아니면 되돌아가지 않음
+        let delta = back - ang(cv, w);
+        delta = ((delta % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        if (delta < 1e-9) delta += 2 * Math.PI;        // 자기 자신(0) 제외, 가장 작은 시계각
+        if (delta < bestDelta) { bestDelta = delta; nx = w; }
+      }
+      if (nx < 0) break;
+      cu = cv; cv = nx;
+      if (cu === a && cv === b) break;                 // 한 바퀴
+    }
+    if (face.length >= 3) faces.push(face.map(n => nodes[n]));
+  }
+  return faces;
+}
+
+// designWalls + 외곽 → designRooms 재계산
+function recomputeDesignRooms() {
+  designRooms = [];
+  if (!designBoundary) return;
+  const segs = [];
+  const b = designBoundary;
+  for (let i = 0; i < b.length; i++) segs.push([b[i], b[(i + 1) % b.length]]);
+  for (const w of designWalls) segs.push([w.a, w.b]);
+  const faces = planarFaces(segs);
+  // 외곽 면적 (외부면 식별·전체와 동일면 제거용)
+  const outArea = shoelaceArea(b);
+  let ci = 0;
+  for (const f of faces) {
+    const ar = shoelaceArea(f);
+    if (ar < _FACE_MIN_AREA) continue;                 // 너무 작은 면 제외
+    if (ar > outArea * 0.97) continue;                 // 외곽 전체와 동일(=아직 안 나뉨)·외부면 제외
+    designRooms.push({ poly: f, area_m2: +(ar / 1e6).toFixed(2), color: ROOM_PALETTE[ci % ROOM_PALETTE.length] });
+    ci++;
+  }
+}
+
+// ── 렌더링 ─────────────────────────────────────────────────────────────────
+let _designWallMeshes = [], _designRoomMeshes = [];
+function renderDesignWalls() {
+  for (const m of _designWallMeshes) { designGroup.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); }
+  _designWallMeshes = [];
+  const H = 2.6;
+  for (const w of designWalls) {
+    // 얇은 수직 평면 (두께 0, 벽처럼 보이게)
+    const ax = w.a[0] / 1000, az = w.a[1] / 1000, bx = w.b[0] / 1000, bz = w.b[1] / 1000;
+    const len = Math.hypot(bx - ax, bz - az);
+    if (len < 1e-4) continue;
+    const geo = new THREE.PlaneGeometry(len, H);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xe2e6ee, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }));
+    mesh.position.set((ax + bx) / 2, H / 2, (az + bz) / 2);
+    mesh.rotation.y = -Math.atan2(bz - az, bx - ax);
+    designGroup.add(mesh); _designWallMeshes.push(mesh);
+    // 바닥 라인
+    const lg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(ax, 0.04, az), new THREE.Vector3(bx, 0.04, bz)]);
+    const ln = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0xffffff }));
+    designGroup.add(ln); _designWallMeshes.push(ln);
+  }
+}
+function renderDesignRooms() {
+  for (const m of _designRoomMeshes) { designGroup.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); }
+  _designRoomMeshes = [];
+  for (const rm of designRooms) {
+    const shape = new THREE.Shape(rm.poly.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)));
+    const tile = new THREE.Mesh(new THREE.ShapeGeometry(shape),
+      new THREE.MeshBasicMaterial({ color: rm.color, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+    tile.rotation.x = Math.PI / 2; tile.position.y = 0.02;
+    designGroup.add(tile); _designRoomMeshes.push(tile);
+    const c = polyCentroid(rm.poly);
+    const label = makeLabel(`${rm.area_m2}㎡`);
+    label.position.set(c[0] / 1000, 0.6, c[1] / 1000);
+    designGroup.add(label); _designRoomMeshes.push(label);
+  }
+}
+
+// ── 진입/이탈/undo ─────────────────────────────────────────────────────────
+async function enterDesignMode(unit) {
+  // 빈 외곽(봉투) 백엔드 요청
+  const polys = parsedData.rooms.filter(r => r.unit === unit).map(r => r.polygon_mm);
+  if (!polys.length) { showStatus(`${UNIT_LABELS[unit]}에 지정된 방이 없습니다.`, "error"); return false; }
+  showStatus("빈 외곽 생성 중...", "info");
+  let boundary;
+  try {
+    const res = await fetch(`${API}/api/unit-boundary`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polygons: polys }) });
+    if (!res.ok) throw new Error(await res.text());
+    boundary = (await res.json()).boundary_mm;
+  } catch (err) {
+    showStatus("빈 외곽 생성 실패: " + err.message, "error"); return false;
+  }
+  if (!boundary || boundary.length < 3) { showStatus("외곽을 만들 수 없습니다.", "error"); return false; }
+
+  designUnit = unit; designBoundary = boundary; designWalls = []; designRooms = []; designHistory = [];
+
+  // 원본 레이어 숨김 (원본 데이터는 보존 — 나가면 복귀)
+  roomTiles.forEach(t => t.visible = false);
+  roomRings.forEach(r => r.visible = false);
+  roomLabels.forEach(l => l.visible = false);
+  if (unitHighlight) unitHighlight.visible = false;
+  if (wallExtrudeMesh) wallExtrudeMesh.visible = false;
+
+  // 설계 레이어
+  designGroup = new THREE.Group();
+  roomScene.add(designGroup);
+  // 빈 바닥
+  const floor = new THREE.Mesh(
+    new THREE.ShapeGeometry(new THREE.Shape(boundary.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)))),
+    new THREE.MeshBasicMaterial({ color: 0x1b1b24, side: THREE.DoubleSide }));
+  floor.rotation.x = Math.PI / 2; floor.position.y = -0.01;
+  designGroup.add(floor);
+  // 외곽 봉투 외곽선 + 외곽 벽(수직 평면)
+  const ring3 = [...boundary, boundary[0]].map(p => new THREE.Vector3(p[0] / 1000, 0.05, p[1] / 1000));
+  designGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring3),
+    new THREE.LineBasicMaterial({ color: 0x1a6cf5 })));
+  const H = 2.6;
+  for (let i = 0; i < boundary.length; i++) {
+    const a = boundary[i], b = boundary[(i + 1) % boundary.length];
+    const ax = a[0] / 1000, az = a[1] / 1000, bx = b[0] / 1000, bz = b[1] / 1000;
+    const len = Math.hypot(bx - ax, bz - az);
+    if (len < 1e-4) continue;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(len, H),
+      new THREE.MeshBasicMaterial({ color: 0x8a93a6, transparent: true, opacity: 0.32, side: THREE.DoubleSide, depthWrite: false }));
+    mesh.position.set((ax + bx) / 2, H / 2, (az + bz) / 2);
+    mesh.rotation.y = -Math.atan2(bz - az, bx - ax);
+    designGroup.add(mesh);
+  }
+  renderDesignWalls(); renderDesignRooms();
+  return true;
+}
+
+function exitDesignMode() {
+  if (designGroup && roomScene) {
+    designGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    roomScene.remove(designGroup);
+  }
+  designGroup = null; _designWallMeshes = []; _designRoomMeshes = [];
+  designBoundary = null; designWalls = []; designRooms = []; designHistory = [];
+  designUnit = null; drawStart = null; designDrawing = false;
+  // 원본 레이어 복귀
+  roomTiles.forEach(t => t.visible = true);
+  roomRings.forEach(r => r.visible = true);
+  roomLabels.forEach(l => l.visible = true);
+  if (unitHighlight) unitHighlight.visible = true;
+  if (wallExtrudeMesh) wallExtrudeMesh.visible = true;
+}
+
+function undoDesignWall() {
+  if (!designHistory.length) { showStatus("되돌릴 벽이 없습니다.", "info"); return; }
+  designWalls = designHistory.pop();
+  recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
+  updateDesignActions();
+  showStatus("↩️ 직전 벽을 되돌렸습니다.", "ok");
+}
+function resetDesignWalls() {
+  if (!designWalls.length) return;
+  designHistory = []; designWalls = []; designRooms = [];
+  recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
+  updateDesignActions();
+  showStatus("↺ 빈 외곽으로 초기화했습니다.", "ok");
+}
+
+function updateDesignActions() {
+  const wrap = document.getElementById("design-actions");
+  if (wrap) wrap.style.display = designMode ? "flex" : "none";
+  const u = document.getElementById("btn-undo-design");
+  const r = document.getElementById("btn-reset-design");
+  if (u) u.disabled = !designHistory.length;
+  if (r) r.disabled = !designWalls.length;
+  const info = document.getElementById("design-info");
+  if (info) info.textContent = `벽 ${designWalls.length}개 · 방 ${designRooms.length}개`;
+}
+
+// ── 모드 토글 / 세대 선택 ───────────────────────────────────────────────────
+function resetDesignUI() {
+  designMode = false;
+  exitDesignMode();
+  const btn = document.getElementById("btn-design-mode");
+  if (btn) { btn.textContent = "내부 설계 모드 시작"; btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary"); }
+  ["design-unit-picker", "design-actions", "design-hint"].forEach(id => {
+    const el = document.getElementById(id); if (el) el.style.display = "none";
+  });
+}
+
+function buildDesignUnitButtons(assignedUnits) {
+  document.querySelectorAll(".du-btn").forEach(b => b.disabled = !assignedUnits.includes(b.dataset.unit));
+}
+
+async function selectDesignUnit(u) {
+  if (designGroup) exitDesignMode();   // 이전 세대 레이어 정리
+  document.querySelectorAll(".du-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === u));
+  const ok = await enterDesignMode(u);
+  updateDesignActions();
+  if (ok) showStatus(`🎨 ${UNIT_LABELS[u]} 내부 설계 — 좌클릭 드래그로 벽을 그으세요. 우클릭=카메라.`, "info");
+}
+
+async function setDesignMode(on) {
+  const btn = document.getElementById("btn-design-mode");
+  if (on) {
+    const assigned = [...new Set((parsedData ? parsedData.rooms : []).map(r => r.unit).filter(Boolean))];
+    if (!assigned.length) {
+      showStatus("먼저 '세대 묶기'로 방을 세대에 지정하세요.", "error"); return;
+    }
+    // 다른 모드 끄기
+    if (unitMode) document.getElementById("btn-unit-mode").click();
+    if (editMode) setEditMode(false);
+    selectRoom(null);
+    designMode = true;
+    btn.textContent = "내부 설계 모드 종료";
+    btn.classList.remove("btn-secondary"); btn.classList.add("btn-primary");
+    document.getElementById("design-unit-picker").style.display = "block";
+    document.getElementById("design-actions").style.display = "flex";
+    document.getElementById("design-hint").style.display = "block";
+    buildDesignUnitButtons(assigned);
+    await selectDesignUnit(assigned.includes(currentUnit) ? currentUnit : assigned[0]);
+  } else {
+    resetDesignUI();
+    showStatus("내부 설계 모드를 종료했습니다.", "ok");
+  }
+}
+document.getElementById("btn-design-mode").addEventListener("click", () => setDesignMode(!designMode));
+document.querySelectorAll(".du-btn").forEach(b =>
+  b.addEventListener("click", () => { if (!b.disabled) selectDesignUnit(b.dataset.unit); }));
+document.getElementById("btn-undo-design").addEventListener("click", undoDesignWall);
+document.getElementById("btn-reset-design").addEventListener("click", resetDesignWalls);
+// Ctrl+Z (설계 모드)
+window.addEventListener("keydown", e => {
+  if (designMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault(); undoDesignWall();
+  }
+});
 
 function applyRoomName() {
   if (selectedRoomIdx === null || !parsedData) return;
