@@ -433,6 +433,16 @@
 
     <div>
       <div class="section-label">🧠 AI 배치 조언</div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
+        <span style="font-size:11px; color:#666; white-space:nowrap;">도면 위쪽 방위</span>
+        <select id="orientation-select" style="flex:1; background:#1a1a22; border:1px solid #2a2a35; border-radius:6px; padding:5px 8px; color:#ddd; font-size:11px; outline:none;">
+          <option value="모름">모름</option>
+          <option value="북">북쪽</option>
+          <option value="남">남쪽</option>
+          <option value="동">동쪽</option>
+          <option value="서">서쪽</option>
+        </select>
+      </div>
       <textarea id="advice-input" placeholder="예: 안방을 남향으로 옮기면 어때? / 화장실 위치가 동선상 비효율적인데 어디가 나을까?" disabled></textarea>
       <div class="advice-examples">
         <span class="advice-chip">안방을 남향으로 옮기면 어때?</span>
@@ -1267,6 +1277,7 @@ async function requestAdvice() {
     id: r.id, names: r.names || [], area_m2: r.area_m2, polygon_mm: r.polygon_mm,
   }));
 
+  const orientation = document.getElementById("orientation-select").value;
   try {
     const res = await fetch(`${API}/api/ai-advice`, {
       method: "POST",
@@ -1276,6 +1287,7 @@ async function requestAdvice() {
         rooms,
         building_outline_mm: parsedData.building_outline_mm,
         outline_area_m2: parsedData.outline_area_m2,
+        building_orientation: orientation,
       }),
     });
     if (!res.ok) { throw new Error((await res.text()).slice(0, 300)); }

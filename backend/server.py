@@ -86,22 +86,19 @@ async def parse_pdf_endpoint(file: UploadFile = File(...), page_index: int = 0):
 # ─── AI 배치 조언 (Claude) ──────────────────────────────────────────────────
 
 _ADVICE_SYSTEM = """당신은 한국의 주택 평면 설계·인테리어 배치 전문가입니다.
-의뢰인은 땅/주택을 매입해 신축하는 시공업자(JJ)입니다. 설계사 도면을 받아
-3D로 확인하는 단계이며, 방 배치를 어떻게 개선할지 실무 조언을 원합니다.
+의뢰인은 땅/주택을 매입해 신축하는 시공업자(JJ)입니다.
 
-답변 원칙:
-- 제공된 [평면도 구조 데이터]의 방 이름·면적·위치(도면 기준 상/하/좌/우)만을
-  근거로 구체적으로 조언하세요. 데이터에 없는 치수를 지어내지 마세요.
-- 동선(현관→거실→주방, 공용/사적 영역 분리), 채광·환기, 사생활, 면적 효율,
-  습식공간(욕실·주방) 배관 집중 등 실무 관점을 활용하세요.
-- ⚠️ 방위(동/서/남/북)는 도면에 없으면 '미상'입니다. "남향" 같은 질문에는
-  방위 정보가 없음을 먼저 알리고, 사용자가 방위를 알려주면 더 정확하다고
-  안내하되, 도면상 상대 위치로 가능한 조언을 주세요.
-- 구조벽 이동은 비용·구조안전(내력벽 여부) 문제가 크다는 점을 현실적으로 짚되,
-  가능한 대안(비내력벽/경량벽 조정, 가구 배치 변경)도 제시하세요.
-- 자동 추출된 방 이름은 오타가 있을 수 있습니다(예: 안방이 '현관'으로 표기).
-  배치가 이름과 안 맞으면 그 가능성도 언급하세요.
-- 한국어로, 핵심부터 간결하게. 불릿과 짧은 단락 사용. 과한 일반론은 피하세요."""
+답변 규칙:
+- 방을 언급할 때는 반드시 이름과 면적으로 식별 (예: 거실(25.16㎡), 욕실A(2.97㎡)).
+  도면 위치 코드(상앙·중우·하좌 등 약어)를 응답에 그대로 쓰지 마세요.
+- 사용자 질문에 직접 답하는 핵심 조언 3~4개만. 전체 세대를 모두 분석하지 마세요.
+- 각 조언은 "[방이름(면적)] → [어떻게] → [왜]" 형식으로 1~2줄 이내.
+- [평면도 구조 데이터]의 방위 정보가 있으면 채광·환기를 구체적으로 조언하세요.
+  방위 정보가 없으면 첫 줄에 "(방위 미상 — 도면 위쪽 방위를 입력하면 더 정확)" 한 줄만 쓰고 바로 조언으로 넘어가세요.
+- 동선(현관→거실→주방), 배관 집중(습식공간 인접), 공용/사적 영역 분리 등 실무 관점 활용.
+- 구조벽 이동 시 비용·내력벽 위험을 짚되 대안(비내력벽·가구 배치)도 제시.
+- 자동 추출 방 이름은 오타일 수 있음 (예: 안방→현관 오기). 배치가 이름과 안 맞으면 언급.
+- 한국어. 불릿 사용. 일반론 최소화."""
 
 
 def _room_position(cx, cy, bx0, by0, bx1, by1):
@@ -110,12 +107,12 @@ def _room_position(cx, cy, bx0, by0, bx1, by1):
     h = (by1 - by0) or 1.0
     fx = (cx - bx0) / w
     fy = (cy - by0) / h
-    vert = "상" if fy < 0.34 else ("하" if fy > 0.66 else "중")
-    horiz = "좌" if fx < 0.34 else ("우" if fx > 0.66 else "앙")
-    return vert + horiz
+    vert = "상단" if fy < 0.34 else ("하단" if fy > 0.66 else "중간")
+    horiz = "좌측" if fx < 0.34 else ("우측" if fx > 0.66 else "중앙")
+    return f"{vert} {horiz}"
 
 
-def _build_advice_context(rooms, outline, area_m2):
+def _build_advice_context(rooms, outline, area_m2, orientation=None):
     """파싱된 방 데이터를 Claude용 텍스트 컨텍스트로 정리."""
     xs = [p[0] for p in outline] if outline else [0]
     ys = [p[1] for p in outline] if outline else [0]
@@ -130,6 +127,12 @@ def _build_advice_context(rooms, outline, area_m2):
     anchors = [name_count.get(k, 0) for k in ("현관", "거실", "주방")]
     units = max(anchors) if max(anchors) > 0 else None
 
+    # 방위 라인
+    if orientation and orientation not in ("모름", "?"):
+        orientation_line = f"도면 방위: 도면 위쪽={orientation}쪽 (채광·환기 조언 시 이 기준 사용)\n"
+    else:
+        orientation_line = "도면 방위: 미상\n"
+
     # 면적 큰 순으로 정렬해 중요한 방 먼저
     items = sorted(rooms, key=lambda r: r.get("area_m2", 0), reverse=True)
     lines = []
@@ -140,9 +143,9 @@ def _build_advice_context(rooms, outline, area_m2):
             cy = sum(p[1] for p in poly) / len(poly)
             pos = _room_position(cx, cy, bx0, by0, bx1, by1)
         else:
-            pos = "?"
+            pos = "위치미상"
         nm = "·".join(r.get("names") or []) or f"(이름없음 #{r.get('id')})"
-        lines.append(f"- {nm} · {r.get('area_m2', '?')}㎡ · 도면 위치 {pos}")
+        lines.append(f"- {nm}({r.get('area_m2', '?')}㎡) — 도면 {pos}")
 
     named = sum(1 for r in rooms if r.get("names"))
     counts_str = ", ".join(f"{k}×{v}" for k, v in name_count.most_common()) or "(이름 매칭 없음)"
@@ -151,12 +154,11 @@ def _build_advice_context(rooms, outline, area_m2):
         "[평면도 구조 데이터]\n"
         f"전체 외곽 면적: {area_m2}㎡\n"
         f"방 개수: {len(rooms)}개 (이름 매칭 {named}개)\n"
-        f"추정 세대 수: {units if units else '미상'} "
-        "(현관/거실/주방 개수로 추정 — 부정확할 수 있음)\n"
+        f"추정 세대 수: {units if units else '미상'} (현관/거실/주방 개수로 추정)\n"
         f"방 종류별 개수: {counts_str}\n"
-        "방위(동서남북): 미상 — 도면에 방위 정보 없음. 아래 위치는 '도면 기준' "
-        "상/하/좌/우(상=도면 위쪽).\n\n"
-        "[방 목록] (면적 큰 순)\n" + "\n".join(lines)
+        f"{orientation_line}"
+        "\n[방 목록] (면적 큰 순, 도면 위치는 도면 기준 상단/하단/중간 × 좌측/우측/중앙)\n"
+        + "\n".join(lines)
     )
 
 
@@ -173,17 +175,18 @@ async def ai_advice(payload: dict):
     rooms = payload.get("rooms") or []
     outline = payload.get("building_outline_mm") or []
     area_m2 = payload.get("outline_area_m2")
+    orientation = (payload.get("building_orientation") or "").strip() or None
     if not rooms:
         raise HTTPException(400, "방 데이터가 없습니다. 먼저 PDF를 파싱하세요.")
 
-    context = _build_advice_context(rooms, outline, area_m2)
+    context = _build_advice_context(rooms, outline, area_m2, orientation=orientation)
 
     try:
         from anthropic import Anthropic
         client = Anthropic(api_key=api_key)
         msg = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=1024,
             system=_ADVICE_SYSTEM,
             messages=[{
                 "role": "user",
