@@ -380,6 +380,17 @@
       display: inline-block; margin-right: 10px;
       font-weight: 600;
     }
+
+    /* 구조 편집 */
+    #btn-edit-mode { width: 100%; }
+    #edit-info {
+      display: none; margin-top: 10px;
+      background: #1a1a22; border: 1px solid #2a2a35;
+      border-left: 3px solid #ff8c00; border-radius: 8px; padding: 10px 12px;
+    }
+    #edit-info .ei-title { font-size: 11px; color: #ffa733; font-weight: 700; margin-bottom: 6px; }
+    #edit-areas { font-size: 12px; color: #ddd; line-height: 1.7; }
+    .edit-hint { font-size: 10px; color: #555; margin-top: 6px; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -502,6 +513,20 @@
       <div class="unit-counts" id="unit-counts"></div>
     </div>
 
+    <!-- 구조 편집 (벽 이동) -->
+    <div>
+      <div class="section-label">🔧 구조 편집</div>
+      <button class="action-btn btn-secondary" id="btn-edit-mode" disabled>벽 이동 모드 시작</button>
+      <div id="edit-info">
+        <div class="ei-title">선택된 벽 — 드래그로 이동</div>
+        <div id="edit-areas">—</div>
+        <div class="edit-hint">접한 방 면적이 실시간 갱신됩니다.</div>
+      </div>
+      <div class="edit-hint" id="edit-hint-main" style="display:none;">
+        주황색으로 표시된 벽만 이동할 수 있습니다(직선 내벽). 비축정렬·외벽은 v1 미지원.
+      </div>
+    </div>
+
     <!-- 방 이름 수정 (방 클릭 시 표시) -->
     <div id="room-edit-section" style="display:none;">
       <div class="section-label" style="margin-bottom:8px;">방 이름 수정</div>
@@ -579,6 +604,24 @@ let currentUnit = "A";       // 지정 모드에서 현재 선택된 세대
 let unitHighlight = null;    // 세대 외곽 하이라이트 (LineSegments)
 const UNIT_COLORS = { A: 0x3b82f6, B: 0x22c55e, C: 0xf97316, common: 0x9ca3af };
 const UNIT_LABELS = { A: "A세대", B: "B세대", C: "C세대", common: "공용" };
+
+// 구조 편집(벽 이동) 상태
+let editMode = false;          // 구조 편집 모드 on/off
+let roomRenderer = null;       // asis 렌더러 (groundPoint/raycast용)
+let roomRings = [];            // 방 경계선 Line (라이브 갱신용)
+let wallExtrudeMesh = null;    // 외곽−방 압출 벽 메시 (라이브 갱신용)
+let wallModel = [];            // 편집 가능한 벽 목록 (좌표 클러스터 페어)
+let wallPickers = [];          // 벽 피커 Box 메시 (raycast/하이라이트)
+let selectedWallId = null;     // 선택된 벽 index
+let wallHighlight = null;      // 선택 벽 에지 케이지
+let wallDragging = false;      // 벽 드래그 중
+let wallJustDragged = false;   // 드래그 직후 클릭 선택 무시용
+let dragLastGround = null;     // 직전 바닥 교차점 (Vector3, m)
+const EDIT_WALL_COLOR = 0xff8c00;   // 편집 가능 벽 피커 색(주황)
+const EDIT_WALL_SEL = 0xffd24a;     // 선택된 벽 색
+// 벽 클러스터링/페어링 상수 (빌라 page3 실측으로 결정 — tol 80mm)
+const _WALL_TOL = 80, _WALL_THICK_MIN = 90, _WALL_THICK_MAX = 350;
+const _WALL_MIN_OVERLAP = 700, _WALL_MIN_MEMB = 3, _WALL_MIN_AREA = 1.0e6; // mm²
 
 function isPdf(file) {
   return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
@@ -722,6 +765,7 @@ async function parsePdf() {
     document.getElementById("advice-input").disabled = false;
     document.getElementById("btn-advice").disabled = false;
     document.getElementById("btn-unit-mode").disabled = false;
+    document.getElementById("btn-edit-mode").disabled = false;
     updateUnitCounts();
 
     renderParsed("panel-asis", "ph-asis", data, "asis");
@@ -886,8 +930,11 @@ function renderParsed(panelId, phId, data, key) {
   }
 
   // 방 편집 상태 초기화
-  roomTiles = []; roomLabels = []; selectionRing = null; selectedRoomIdx = null;
+  roomTiles = []; roomLabels = []; roomRings = []; selectionRing = null; selectedRoomIdx = null;
   unitHighlight = null;
+  wallModel = []; wallPickers = []; selectedWallId = null; wallHighlight = null;
+  wallDragging = false; wallExtrudeMesh = null;
+  if (key === "asis" && editMode) resetEditUI();  // 재파싱 시 편집 모드 해제
   document.getElementById("room-edit-section").style.display = "none";
 
   const W = panel.clientWidth, H = panel.clientHeight;
@@ -941,8 +988,10 @@ function renderParsed(panelId, phId, data, key) {
     roomTiles.push(tile);
 
     const ring = [...rm.polygon_mm, rm.polygon_mm[0]].map(p => new THREE.Vector3(p[0] / 1000, 0.015, p[1] / 1000));
-    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring),
-      new THREE.LineBasicMaterial({ color: col })));
+    const ringLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring),
+      new THREE.LineBasicMaterial({ color: col }));
+    scene.add(ringLine);
+    roomRings.push(ringLine);
 
     const c = polyCentroid(rm.polygon_mm);
     const nm = (rm.names && rm.names.length) ? rm.names.join("·") : (rm.name || "");
@@ -962,6 +1011,7 @@ function renderParsed(panelId, phId, data, key) {
                                     side: THREE.DoubleSide, depthWrite: false }));
   wallMesh.rotation.x = Math.PI / 2;
   scene.add(wallMesh);
+  if (key === "asis") { wallExtrudeMesh = wallMesh; roomRenderer = renderer; }
 
   // 외곽 라인
   scene.add(new THREE.Line(
@@ -985,6 +1035,19 @@ function renderParsed(panelId, phId, data, key) {
   // 방 클릭 선택 — 드래그(5px 초과 이동)와 구분
   if (key === "asis") {
     let mdPos = null;
+
+    // 구조 편집: 선택된 벽 위에서 드래그 시작 → orbit 가로채기(capture 단계 stopImmediatePropagation)
+    renderer.domElement.addEventListener("mousedown", e => {
+      if (!editMode || e.button !== 0 || selectedWallId === null) return;
+      const picker = wallPickers[selectedWallId];
+      if (!picker) return;
+      if (rayHits(e, [picker]).length) {
+        wallDragging = true; wallJustDragged = false;
+        dragLastGround = groundPoint(e);
+        e.stopImmediatePropagation(); e.preventDefault();
+      }
+    }, true);
+
     renderer.domElement.addEventListener("mousedown", e => {
       mdPos = { x: e.clientX, y: e.clientY };
     });
@@ -999,6 +1062,20 @@ function renderParsed(panelId, phId, data, key) {
         -((e.clientY - rect.top) / rect.height) * 2 + 1);
       const ray = new THREE.Raycaster();
       ray.setFromCamera(mouse, camera);
+
+      // 구조 편집 모드 → 벽 선택 (방 선택/세대묶기 비활성)
+      if (editMode) {
+        if (wallJustDragged) { wallJustDragged = false; return; }
+        const wh = ray.intersectObjects(wallPickers);
+        if (wh.length) {
+          const id = wh[0].object.userData.wallId;
+          selectWall(id === selectedWallId ? null : id);
+        } else {
+          selectWall(null);
+        }
+        return;
+      }
+
       const hits = ray.intersectObjects(roomTiles);
       if (hits.length) {
         const idx = hits[0].object.userData.roomIdx;
@@ -1372,6 +1449,7 @@ document.getElementById("btn-unit-mode").addEventListener("click", () => {
   const btn = document.getElementById("btn-unit-mode");
   document.getElementById("unit-picker").style.display = unitMode ? "block" : "none";
   if (unitMode) {
+    if (editMode) resetEditUI();      // 구조 편집과 충돌 방지
     btn.textContent = "세대 묶기 모드 종료";
     btn.classList.remove("btn-secondary"); btn.classList.add("btn-primary");
     selectRoom(null);                 // 기존 선택/이름수정 패널 정리 (충돌 방지)
@@ -1385,6 +1463,282 @@ document.getElementById("btn-unit-mode").addEventListener("click", () => {
 });
 document.querySelectorAll(".unit-btn").forEach(b => {
   b.addEventListener("click", () => setCurrentUnit(b.dataset.unit));
+});
+
+// ── 구조 편집 (벽 이동) ─────────────────────────────────────────────────────
+const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+// 폴리곤 면적 (mm²) — shoelace
+function shoelaceArea(poly) {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return Math.abs(a) / 2;
+}
+
+// 포인터 → 바닥평면(y=0) 교차점 (world m)
+function groundPoint(e) {
+  if (!roomRenderer || !roomCamera) return null;
+  const rect = roomRenderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(m, roomCamera);
+  const pt = new THREE.Vector3();
+  return ray.ray.intersectPlane(_groundPlane, pt) ? pt : null;
+}
+
+function rayHits(e, objs) {
+  if (!roomRenderer || !roomCamera) return [];
+  const rect = roomRenderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(m, roomCamera);
+  return ray.intersectObjects(objs);
+}
+
+// 좌표 클러스터링: 정점 X(또는 Y)를 tol 내로 묶어 벽 라인 후보 생성
+function clusterCoord(items, key) {
+  const perpKey = key === "x" ? "y" : "x";
+  const arr = items.slice().sort((a, b) => a[key] - b[key]);
+  const clusters = []; let cur = [arr[0]];
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i][key] - cur[cur.length - 1][key] <= _WALL_TOL) cur.push(arr[i]);
+    else { clusters.push(cur); cur = [arr[i]]; }
+  }
+  clusters.push(cur);
+  return clusters.map(c => {
+    const perp = c.map(p => p[perpKey]);
+    return { center: c.reduce((s, p) => s + p[key], 0) / c.length, members: c,
+             lo: Math.min(...perp), hi: Math.max(...perp) };
+  });
+}
+
+// 두께 페어링: 간격이 벽두께 범위이고 수직범위가 겹치는 두 라인 = 내벽 한 장
+function pairWalls(clusters, axis) {
+  const walls = [];
+  for (let i = 0; i < clusters.length - 1; i++) {
+    const A = clusters[i];
+    if (A.members.length < _WALL_MIN_MEMB) continue;
+    for (let j = i + 1; j < clusters.length; j++) {
+      const B = clusters[j];
+      const gap = B.center - A.center;
+      if (gap < _WALL_THICK_MIN) continue;
+      if (gap > _WALL_THICK_MAX) break;                 // 정렬돼 있으니 더 볼 것 없음
+      if (B.members.length < _WALL_MIN_MEMB) continue;
+      const lo = Math.max(A.lo, B.lo), hi = Math.min(A.hi, B.hi);
+      if (hi - lo < _WALL_MIN_OVERLAP) continue;        // 겹치는 길이 부족 → 같은 벽 아님
+      const ra = new Set(A.members.map(m => m.r)), rb = new Set(B.members.map(m => m.r));
+      const distinct = [...rb].some(x => !ra.has(x)) || [...ra].some(x => !rb.has(x));
+      if (!distinct) continue;                          // 같은 방 자체 두께(노이즈) 제외
+      const members = [];
+      for (const c of [A, B]) for (const m of c.members) {
+        const perp = axis === "V" ? m.y : m.x;
+        if (perp >= lo - _WALL_TOL && perp <= hi + _WALL_TOL) members.push({ r: m.r, v: m.v });
+      }
+      walls.push({ axis, a: A.center, b: B.center, center: (A.center + B.center) / 2,
+                   thickness: gap, span: [lo, hi], members });
+      break;                                            // A는 가장 가까운 B와만 페어
+    }
+  }
+  return walls;
+}
+
+function buildWallModel() {
+  wallModel = [];
+  if (!parsedData) return;
+  const items = [];
+  parsedData.rooms.forEach((rm, r) =>
+    rm.polygon_mm.forEach((p, v) => items.push({ r, v, x: p[0], y: p[1] })));
+  wallModel = pairWalls(clusterCoord(items, "x"), "V")
+    .concat(pairWalls(clusterCoord(items, "y"), "H"));
+}
+
+// 편집 가능한 벽에만 주황 피커 생성 (사용자가 만질 수 있는 것만 또렷하게)
+function createWallPickers() {
+  destroyWallPickers();
+  if (!roomScene) return;
+  const wallH = 2.8;
+  wallModel.forEach((w, id) => {
+    const lenM = (w.span[1] - w.span[0]) / 1000;
+    const thM = Math.max(w.thickness / 1000, 0.05);
+    let geo, px, pz;
+    if (w.axis === "V") { geo = new THREE.BoxGeometry(thM, wallH, lenM); px = w.center / 1000; pz = (w.span[0] + w.span[1]) / 2 / 1000; }
+    else { geo = new THREE.BoxGeometry(lenM, wallH, thM); px = (w.span[0] + w.span[1]) / 2 / 1000; pz = w.center / 1000; }
+    const mesh = new THREE.Mesh(geo,
+      new THREE.MeshBasicMaterial({ color: EDIT_WALL_COLOR, transparent: true, opacity: 0.45, depthWrite: false }));
+    mesh.position.set(px, wallH / 2, pz);
+    mesh.userData.wallId = id;
+    mesh.renderOrder = 990;
+    roomScene.add(mesh);
+    wallPickers.push(mesh);
+  });
+}
+
+function destroyWallPickers() {
+  if (roomScene) {
+    wallPickers.forEach(m => { roomScene.remove(m); m.geometry.dispose(); m.material.dispose(); });
+    if (wallHighlight) { roomScene.remove(wallHighlight); wallHighlight = null; }
+  }
+  wallPickers = [];
+}
+
+function selectWall(id) {
+  if (selectedWallId !== null && wallPickers[selectedWallId]) {
+    const p = wallPickers[selectedWallId];
+    p.material.color.setHex(EDIT_WALL_COLOR); p.material.opacity = 0.45;
+  }
+  if (wallHighlight && roomScene) { roomScene.remove(wallHighlight); wallHighlight = null; }
+  selectedWallId = id;
+  if (id === null) { document.getElementById("edit-info").style.display = "none"; return; }
+  const p = wallPickers[id];
+  p.material.color.setHex(EDIT_WALL_SEL); p.material.opacity = 0.85;
+  wallHighlight = new THREE.LineSegments(new THREE.EdgesGeometry(p.geometry),
+    new THREE.LineBasicMaterial({ color: EDIT_WALL_SEL, transparent: true, depthTest: false }));
+  wallHighlight.position.copy(p.position);
+  wallHighlight.renderOrder = 999;
+  roomScene.add(wallHighlight);
+  document.getElementById("edit-info").style.display = "block";
+  showEditAreas([...new Set(wallModel[id].members.map(m => m.r))]);
+}
+
+// 선택 벽을 dmm(mm) 평행 이동 → 접한 방 폴리곤 정점 동시 이동. 과소면적이면 취소.
+function applyWallDelta(wall, dmm) {
+  const ai = wall.axis === "V" ? 0 : 1;   // 0=x, 1=y (도면 mm)
+  for (const m of wall.members) parsedData.rooms[m.r].polygon_mm[m.v][ai] += dmm;
+  const aff = [...new Set(wall.members.map(m => m.r))];
+  for (const r of aff) {
+    if (shoelaceArea(parsedData.rooms[r].polygon_mm) < _WALL_MIN_AREA) {
+      for (const m of wall.members) parsedData.rooms[m.r].polygon_mm[m.v][ai] -= dmm; // 되돌림
+      return false;
+    }
+  }
+  for (const r of aff) { setTileGeometry(r); setRingGeometry(r); }
+  rebuildWallExtrude();
+  wall.center += dmm; wall.a += dmm; wall.b += dmm;
+  const p = wallPickers[selectedWallId];
+  if (wall.axis === "V") p.position.x += dmm / 1000; else p.position.z += dmm / 1000;
+  if (wallHighlight) wallHighlight.position.copy(p.position);
+  showEditAreas(aff);
+  return true;
+}
+
+function setTileGeometry(r) {
+  const poly = parsedData.rooms[r].polygon_mm;
+  roomTiles[r].geometry.dispose();
+  roomTiles[r].geometry = new THREE.ShapeGeometry(
+    new THREE.Shape(poly.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000))));
+}
+
+function setRingGeometry(r) {
+  const poly = parsedData.rooms[r].polygon_mm;
+  const pts = [...poly, poly[0]].map(p => new THREE.Vector3(p[0] / 1000, 0.015, p[1] / 1000));
+  roomRings[r].geometry.dispose();
+  roomRings[r].geometry = new THREE.BufferGeometry().setFromPoints(pts);
+}
+
+function rebuildWallExtrude() {
+  if (!wallExtrudeMesh || !parsedData) return;
+  const outline = parsedData.building_outline_mm;
+  const ws = new THREE.Shape(outline.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)));
+  parsedData.rooms.forEach(rm =>
+    ws.holes.push(new THREE.Path(rm.polygon_mm.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)))));
+  wallExtrudeMesh.geometry.dispose();
+  wallExtrudeMesh.geometry = new THREE.ExtrudeGeometry(ws, { depth: -2.8, bevelEnabled: false });
+}
+
+function refreshLabel(r) {
+  const rm = parsedData.rooms[r];
+  rm.area_m2 = +(shoelaceArea(rm.polygon_mm) / 1e6).toFixed(2);
+  if (roomLabels[r] && roomScene) roomScene.remove(roomLabels[r]);
+  const c = polyCentroid(rm.polygon_mm);
+  const nm = (rm.names && rm.names.length) ? rm.names.join("·") : "";
+  const label = makeLabel(nm ? `${nm}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`);
+  label.position.set(c[0] / 1000, 1.4, c[1] / 1000);
+  roomScene.add(label);
+  roomLabels[r] = label;
+}
+
+function showEditAreas(roomIdxs) {
+  document.getElementById("edit-areas").innerHTML = roomIdxs.map(r => {
+    const rm = parsedData.rooms[r];
+    const nm = (rm.names && rm.names.length) ? rm.names.join("·") : `#${rm.id}`;
+    return `${nm}: ${(shoelaceArea(rm.polygon_mm) / 1e6).toFixed(2)}㎡`;
+  }).join("<br>");
+}
+
+function commitWallMove() {
+  wallJustDragged = false;
+  if (selectedWallId === null) return;
+  const aff = [...new Set(wallModel[selectedWallId].members.map(m => m.r))];
+  aff.forEach(refreshLabel);
+  showStatus("✅ 벽 이동 완료 — 접한 방 면적 갱신.", "ok");
+  // 좌표가 바뀌었으니 모델/피커 재구성(다음 편집은 새 형상 기준)
+  buildWallModel();
+  createWallPickers();
+  selectWall(null);
+}
+
+function resetEditUI() {
+  editMode = false;
+  destroyWallPickers();
+  selectedWallId = null; wallDragging = false;
+  const btn = document.getElementById("btn-edit-mode");
+  btn.textContent = "벽 이동 모드 시작";
+  btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary");
+  document.getElementById("edit-info").style.display = "none";
+  document.getElementById("edit-hint-main").style.display = "none";
+}
+
+function setEditMode(on) {
+  editMode = on;
+  const btn = document.getElementById("btn-edit-mode");
+  if (on) {
+    // 세대 묶기와 충돌 방지 — 켜져 있으면 끈다
+    if (unitMode) {
+      unitMode = false;
+      document.getElementById("unit-picker").style.display = "none";
+      const ub = document.getElementById("btn-unit-mode");
+      ub.textContent = "세대 묶기 모드 시작";
+      ub.classList.remove("btn-primary"); ub.classList.add("btn-secondary");
+    }
+    selectRoom(null);
+    buildWallModel();
+    createWallPickers();
+    btn.textContent = "벽 이동 모드 종료";
+    btn.classList.remove("btn-secondary"); btn.classList.add("btn-primary");
+    document.getElementById("edit-hint-main").style.display = "block";
+    document.getElementById("edit-info").style.display = "none";
+    showStatus(wallModel.length
+      ? `🔧 구조 편집 — 이동 가능한 벽 ${wallModel.length}개(주황). 클릭 선택 후 드래그.`
+      : "이동 가능한 직선 내벽을 찾지 못했습니다.", wallModel.length ? "info" : "error");
+  } else {
+    resetEditUI();
+    showStatus("구조 편집 모드를 종료했습니다.", "ok");
+  }
+}
+document.getElementById("btn-edit-mode").addEventListener("click", () => setEditMode(!editMode));
+
+// 벽 드래그 추적 (window 싱글톤 — 캔버스 재생성과 무관, 중복 적용 방지)
+window.addEventListener("mousemove", e => {
+  if (!wallDragging || selectedWallId === null) return;
+  const now = groundPoint(e);
+  if (!now || !dragLastGround) return;
+  const wall = wallModel[selectedWallId];
+  const dWorld = (wall.axis === "V") ? (now.x - dragLastGround.x) : (now.z - dragLastGround.z);
+  const dmm = dWorld * 1000;
+  if (Math.abs(dmm) < 0.01) return;
+  if (applyWallDelta(wall, dmm)) { dragLastGround = now; wallJustDragged = true; }
+});
+window.addEventListener("mouseup", () => {
+  if (!wallDragging) return;
+  wallDragging = false;
+  commitWallMove();
 });
 
 function applyRoomName() {
