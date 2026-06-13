@@ -378,11 +378,33 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         (updateDesignActions). 파일명 `{세대}_{YYYYMMDD_HHMM}`.
       기존 설계 모드(designDrawing 가드·rAF루프·renderToBe·beforeunload) 무변경.
       검증: ①백엔드 단독 — 더미좌표→%PDF헤더·pdfplumber 1페이지·텍스트추출. ②playwright
-        (_verify_export.py, 빌라 page3 A세대 실드래그) — 벽1방2·버튼활성·toDataURL 63710·
+        (_verify_export.py, 빌라 page3 A세대) — 벽1방2·버튼활성·toDataURL 63710·
         PNG파일 색분산99.2(비단색)·PDF %PDF 1페이지·파일명규칙·에러0. ③PDF를 pypdfium2로
         이미지렌더해 육안확인(외곽·내벽6.91m·방면적·전체가로10.20m/세로16.25m·스케일바 깨끗).
+- [x] **벽 그리기 드래그→클릭-클릭 전환 + 직각 스냅 기본(±20°)+Shift 자유각**.
+      ★문제: 누른 채 드래그→릴리스 방식은 떼는 순간 손떨림이 끝점에 박혀 벽이 틀어짐.
+      → **클릭-클릭 상태머신**: idle─좌클릭▶시작점확정─이동▶hover미리보기─좌클릭▶끝점확정─▶idle.
+      ①클릭/드래그 구분: mousedown은 점 안 찍고 화면좌표(`_drawDownXY`)만 기록, mouseup에서
+        이동량 ≤`_CLICK_MAX_PX`(5px)면 "진짜 클릭"만 점을 찍음(>5px=드래그=무시). 끝점은 클릭
+        위치(=hover 미리보기와 동일)라 손떨림 제거. ②직각 기본: `_ANGLE_DEG` 7→**20**, 시작점
+        기준 0/90 ±20°면 수평/수직 자동 정렬. `snapPoint(raw,from,allowOrtho)` 3번째 인자 추가,
+        **Shift 누르면 allowOrtho=false=자유각**(미리보기·커밋 둘 다 `!e.shiftKey`). 정점>선분>직각
+        우선순위 유지(벽 만나야 방 닫힘). ③취소: **Esc** 또는 **우클릭(≤5px)** → `cancelDraw`
+        (시작점·미리보기만 버림, 저장벽 불변). 우드래그(>5px)는 카메라(기존 contextmenu
+        preventDefault로 브라우저 메뉴 억제). ④오클릭 보호: 둘째 클릭 len<`_DRAW_MIN_MM`(100mm)
+        이면 커밋 안 하고 **진행 유지**(시작점 안 날림). ⑤orbit 충돌 해결: 클릭-클릭이라 두 클릭
+        사이 좌버튼 떼어진 상태(isDragging=false)→hover로 카메라 안 움직임. orbit mousemove의
+        `if(designDrawing)return` 가드 **제거**(진행중 우드래그 카메라 허용). 확정 시 기존
+        undo(designHistory)·recomputeDesignRooms·렌더 경로 무변경. design-hint 문구 갱신.
+      검증(_verify_clickdraw.py, 빌라 page3 A세대, **실제 클릭-클릭**): 직각 ortho_y==from_y·
+        Shift free_y==raw_y / 클릭-클릭 벽1방2·좌클릭중 카메라이동0 / undo벽0 / Esc취소 /
+        ★첫점 후 우드래그 카메라이동1.44>0·시작점고정→이어 확정 / 짧은클릭 진행유지(시작점보존) /
+        에러0. + _verify_export.py도 클릭-클릭 헬퍼로 갱신(내보내기 회귀 없음).
+      ⚠️ 과거 `_verify_design.py`·`_verify_design_v11.py`는 드래그(mouse.down→move→up) 기반이라
+        **stale**(클릭-클릭에선 >5px 드래그=무시되어 깨짐). 삭제 안 하고 보존만. 신규 검증은
+        `_verify_clickdraw.py`/`_verify_export.py` 사용.
 - [ ] 세대별 AI 구조 제안 (다음 증분): 빈 외곽+세대 방그룹 보고 AI가 방 배치 초안 생성→
       JJ가 같은 그리기 도구로 편집(정밀좌표 약하니 초안만). 그 결과도 PNG/PDF로 내보내기 재사용.
-- [ ] (구 구조편집 2단계 아이디어) 그리드 스냅, 벽 두께 입히기(외벽>내벽)
+- [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 
 

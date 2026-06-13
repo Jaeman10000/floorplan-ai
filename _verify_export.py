@@ -44,18 +44,16 @@ CHORD = """
 
 
 def draw_chord(page, frac=1.0):
+    """클릭-클릭으로 수평 벽 1개: 시작점 클릭 → hover → 끝점 클릭."""
     chord = page.evaluate(CHORD)
     assert chord, "chord 계산 실패"
     pL = page.evaluate(PROJ, chord["left"])
     pR = page.evaluate(PROJ, chord["right"])
     ex = pL["x"] + (pR["x"] - pL["x"]) * frac
     ey = pL["y"] + (pR["y"] - pL["y"]) * frac
-    page.mouse.move(pL["x"], pL["y"]); page.mouse.down()
-    for k in range(1, 11):
-        page.mouse.move(pL["x"] + (ex - pL["x"]) * k / 10.0,
-                        pL["y"] + (ey - pL["y"]) * k / 10.0)
-        page.wait_for_timeout(18)
-    page.mouse.up(); page.wait_for_timeout(160)
+    page.mouse.move(pL["x"], pL["y"]); page.mouse.click(pL["x"], pL["y"]); page.wait_for_timeout(60)
+    page.mouse.move(ex, ey); page.wait_for_timeout(40)
+    page.mouse.click(ex, ey); page.wait_for_timeout(160)
 
 
 def png_has_variation(path):

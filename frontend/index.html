@@ -546,10 +546,11 @@
         </div>
       </div>
       <div class="edit-hint" id="design-hint" style="display:none;">
-        내벽이 사라진 빈 외곽에 <b>좌클릭 드래그</b>로 벽을 그으세요. 거의 수평/수직이면 직각으로,
-        기존 벽·외곽 근처면 붙어서 그려집니다. 벽으로 닫힌 공간은 자동으로 방이 됩니다.<br>
+        내벽이 사라진 빈 외곽에 <b>시작점 클릭 → 끝점 클릭</b>으로 벽을 그으세요(드래그 아님).
+        거의 수평/수직이면 <b>직각으로 자동 정렬</b>되고, <b>Shift</b>를 누르면 자유 각도입니다.
+        기존 벽·외곽 근처면 붙어서 그려져 벽이 만나면 닫힌 공간이 자동으로 방이 됩니다.<br>
         <b>💾 저장</b>하면 우측 To-Be 패널에 새 구조로 남고, 종료/재진입해도 유지됩니다.<br>
-        우클릭=카메라 회전 · Ctrl+Z=되돌리기.
+        우드래그=카메라 · <b>Esc/우클릭=그리던 선 취소</b> · Ctrl+Z=되돌리기.
       </div>
     </div>
 
@@ -643,8 +644,10 @@ let designBoundary = null;     // 빈 외곽 ring (mm) — 백엔드 shapely uni
 let designWalls = [];          // JJ가 그린 벽 선분 [{a:[x,y], b:[x,y]}]
 let designRooms = [];          // 닫힌 면 = 방 [{poly, area_m2, color}]
 let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
-let designDrawing = false;     // 좌클릭 드래그로 벽 그리는 중 (orbit 차단)
-let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm
+let designDrawing = false;     // 그리기 진행중 (첫 점 찍힘, 둘째 클릭 대기) = drawStart!=null
+let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm (null=idle)
+let _drawDownXY = null;        // 설계모드 좌버튼 mousedown 화면좌표 (클릭/드래그 구분용)
+let _rightDownXY = null;       // 설계모드 우버튼 mousedown 화면좌표 (우클릭취소 vs 우드래그카메라 구분)
 let drawPreview = null;        // 미리보기 선 Line
 let drawLenLabel = null;       // 길이 표시 스프라이트
 let designHistory = [];        // undo 스택 (designWalls 깊은복사)
@@ -653,8 +656,9 @@ let designHistory = [];        // undo 스택 (designWalls 깊은복사)
 let unitDesigns = {};
 let tobeScene = null;          // To-Be 패널 씬 (검증용 노출)
 const _SNAP_MM = 350;          // 정점/선분 스냅 반경 (mm)
-const _ANGLE_DEG = 7;          // 직각 스냅 허용각
-const _DRAW_MIN_MM = 100;      // 이보다 짧은 드래그는 벽으로 안 침
+const _ANGLE_DEG = 20;         // 직각 스냅 허용각 (기본 직각, Shift=자유각)
+const _DRAW_MIN_MM = 100;      // 이보다 짧은 선은 벽으로 안 침 (오클릭 취급)
+const _CLICK_MAX_PX = 5;       // 이보다 많이 움직이면 클릭 아님(드래그) → 점 안 찍음
 const _FACE_MIN_AREA = 0.5e6;  // 방으로 인정할 최소 면적 (mm²)
 const _NODE_TOL = 50;          // 평면그래프 노드 병합 허용 (mm)
 
@@ -1072,12 +1076,11 @@ function renderParsed(panelId, phId, data, key) {
   if (key === "asis") {
     let mdPos = null;
 
-    // 내부 설계 모드: 좌클릭 누르면 벽 그리기 시작 (orbit 좌버튼은 designMode에서 비활성)
+    // 내부 설계 모드: 좌버튼 누름 = 점 안 찍고 화면좌표만 기록(클릭/드래그는 mouseup에서 판정).
+    // orbit 좌버튼은 designMode에서 비활성. stopImmediatePropagation으로 room-select도 차단.
     renderer.domElement.addEventListener("mousedown", e => {
       if (!designMode || e.button !== 0 || !designBoundary) return;
-      drawStart = snapPoint(groundMM(e), null);
-      designDrawing = true;
-      beginDrawPreview();
+      _drawDownXY = { x: e.clientX, y: e.clientY };
       e.stopImmediatePropagation(); e.preventDefault();
     }, true);
 
@@ -1143,7 +1146,8 @@ function attachOrbit(renderer, camera, cx, cz, maxDist) {
   renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
   window.addEventListener("mouseup", () => isDragging = false);
   window.addEventListener("mousemove", e => {
-    if (designDrawing) return;  // 벽 그리기 중엔 카메라 금지 (드래그-회전 충돌 차단)
+    // 클릭-클릭이라 좌버튼은 떼어진 상태(isDragging=false) → hover로 카메라 안 움직임.
+    // 진행중 우드래그 카메라는 허용해야 하므로 designDrawing 가드 없음.
     if (!isDragging) return;
     const dx = e.clientX - prevMouse.x, dy = e.clientY - prevMouse.y;
     prevMouse = { x: e.clientX, y: e.clientY };
@@ -1550,11 +1554,11 @@ function _projOnSeg(p, a, b) {
   const q = [a[0] + t * vx, a[1] + t * vy];
   return { pt: q, d: Math.hypot(p[0] - q[0], p[1] - q[1]), t };
 }
-function snapPoint(raw, from) {
+function snapPoint(raw, from, allowOrtho = true) {
   if (!raw) return raw;
   let p = raw.slice();
-  // 3) 직각 스냅 (from 있을 때) — 먼저 직교화한 뒤 정점/선분 스냅으로 덮어씀
-  if (from) {
+  // 3) 직각 스냅 (from 있을 때, Shift 안 누르면) — 먼저 직교화한 뒤 정점/선분 스냅으로 덮어씀
+  if (from && allowOrtho) {
     const dx = p[0] - from[0], dy = p[1] - from[1];
     const ang = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
     const tol = _ANGLE_DEG;
@@ -1608,34 +1612,68 @@ function endDrawPreview() {
   drawPreview = null; drawLenLabel = null;
 }
 
-// 그리기 드래그 (window 싱글톤)
+// 진행중 선 취소 (Esc / 우클릭) — 시작점·미리보기만 버림, 저장된 벽은 안 건드림
+function cancelDraw() {
+  if (!drawStart) return;
+  endDrawPreview();
+  drawStart = null; designDrawing = false; _drawDownXY = null;
+  showStatus("그리기를 취소했습니다.", "info");
+}
+
+// ── 클릭-클릭 그리기 (window 싱글톤) ────────────────────────────────────────
+// 우버튼 down 좌표 기록 — 우클릭(취소) vs 우드래그(카메라) 구분용
+window.addEventListener("mousedown", e => {
+  if (e.button === 2 && designMode) _rightDownXY = { x: e.clientX, y: e.clientY };
+});
+// hover 미리보기: 진행중(drawStart!=null)이면 버튼 안 눌러도 끝점을 따라감.
 window.addEventListener("mousemove", e => {
-  if (!designDrawing || !drawStart) return;
+  if (!designMode || !drawStart) return;
   const raw = groundMM(e);
   if (!raw) return;
-  updateDrawPreview(snapPoint(raw, drawStart));
+  updateDrawPreview(snapPoint(raw, drawStart, !e.shiftKey));
 });
+// 좌버튼 떼는 순간: mousedown 대비 이동량으로 클릭/드래그 판정 → 클릭만 점을 찍는다.
 window.addEventListener("mouseup", e => {
-  if (!designDrawing) return;
-  designDrawing = false;
-  const raw = groundMM(e);
-  const end = raw ? snapPoint(raw, drawStart) : null;
-  endDrawPreview();
-  if (drawStart && end) {
-    const len = Math.hypot(end[0] - drawStart[0], end[1] - drawStart[1]);
-    if (len >= _DRAW_MIN_MM) {
-      designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
-      if (designHistory.length > 50) designHistory.shift();
-      designWalls.push({ a: drawStart.slice(), b: end.slice() });
-      recomputeDesignRooms();
-      renderDesignWalls();
-      renderDesignRooms();
-      updateDesignActions();
-      const nr = designRooms.length;
-      showStatus(`벽 추가 (${(len / 1000).toFixed(2)}m). ${nr ? `닫힌 방 ${nr}개 인식됨.` : "아직 닫힌 방 없음 — 벽이 만나야 방이 닫힙니다."}`, nr ? "ok" : "info");
-    }
+  // 우클릭(이동 거의 없음) = 진행중 선 취소
+  if (e.button === 2 && drawStart && _rightDownXY) {
+    const m = Math.hypot(e.clientX - _rightDownXY.x, e.clientY - _rightDownXY.y);
+    _rightDownXY = null;
+    if (m <= _CLICK_MAX_PX) { cancelDraw(); return; }
   }
-  drawStart = null;
+  if (e.button === 2) { _rightDownXY = null; return; }
+  if (e.button !== 0 || !designMode || !_drawDownXY) return;
+  const moved = Math.hypot(e.clientX - _drawDownXY.x, e.clientY - _drawDownXY.y);
+  _drawDownXY = null;
+  if (moved > _CLICK_MAX_PX) return;   // 드래그였음 → 점 안 찍음(손떨림·미세이동 무시)
+
+  const raw = groundMM(e);
+  if (!raw) return;
+  if (!drawStart) {
+    // ① 시작점 확정
+    drawStart = snapPoint(raw, null);
+    designDrawing = true;
+    beginDrawPreview();
+    showStatus("시작점 지정됨 — 끝점을 클릭하세요. (Shift=자유각, Esc/우클릭=취소)", "info");
+    return;
+  }
+  // ② 끝점 확정
+  const end = snapPoint(raw, drawStart, !e.shiftKey);
+  const len = Math.hypot(end[0] - drawStart[0], end[1] - drawStart[1]);
+  if (len < _DRAW_MIN_MM) {        // 너무 짧음 = 오클릭 → 진행 유지(시작점 안 날림)
+    showStatus("너무 짧습니다 — 끝점을 더 멀리 클릭하세요.", "info");
+    return;
+  }
+  designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+  if (designHistory.length > 50) designHistory.shift();
+  designWalls.push({ a: drawStart.slice(), b: end.slice() });
+  endDrawPreview();
+  drawStart = null; designDrawing = false;   // idle 복귀
+  recomputeDesignRooms();
+  renderDesignWalls();
+  renderDesignRooms();
+  updateDesignActions();
+  const nr = designRooms.length;
+  showStatus(`벽 추가 (${(len / 1000).toFixed(2)}m). ${nr ? `닫힌 방 ${nr}개 인식됨.` : "아직 닫힌 방 없음 — 벽이 만나야 방이 닫힙니다."}`, nr ? "ok" : "info");
 });
 
 // ── 평면그래프 면 순회: segments(외곽+벽) → 최소 닫힌 면(방) ────────────────
@@ -2040,6 +2078,8 @@ document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPd
 window.addEventListener("keydown", e => {
   if (designMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
     e.preventDefault(); undoDesignWall();
+  } else if (designMode && e.key === "Escape" && drawStart) {
+    e.preventDefault(); cancelDraw();
   }
 });
 
