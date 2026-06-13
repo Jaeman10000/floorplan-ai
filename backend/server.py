@@ -298,48 +298,56 @@ _LAYOUT_SYSTEM = (
 def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
                          fixed_rooms=None, avail_bbox=None):
     """레이아웃 생성 프롬프트.
-    고정 방이 있으면 외곽 폴리곤 대신 '사용가능영역 bbox'를 주고(정밀 폴리곤을 AI가
-    따라 그리길 기대하지 않음 — MultiPolygon이면 더 헷갈림), 고정 영역의 bbox·이름을
-    명시해 침범 금지. 실제 방어선은 백엔드의 avail 교차 클립(이중 안전망)이다."""
+    고정 방이 있으면 전체 외곽 bbox + 점유 구역을 100mm 격자 스냅 좌표 + 비겹침 조건으로
+    명시. 'avail_bbox'는 고정방 제거 후에도 외곽과 거의 같아 AI에게 misleading → 사용 안 함.
+    실제 방어선은 백엔드의 avail 교차 클립(이중 안전망)."""
+    import math as _math
     bx0, by0, bx1, by1 = bbox
     fixed_rooms = fixed_rooms or []
     base_public = ["현관", "거실", "주방(또는 LDK)", "다용도실"]
     fixed_names = [str(fr.get("name") or "").strip() for fr in fixed_rooms]
     fixed_names = [n for n in fixed_names if n]
-    # 이미 고정된 용도는 만들어야 할 공용공간 목록에서 제외
     public_todo = [p for p in base_public
                    if not any(n and (n in p or p.split("(")[0] in n) for n in fixed_names)]
     public_str = "·".join(public_todo) if public_todo else "(추가 공용공간 없음 — 이미 고정됨)"
 
     lines = [f"[세대] {unit or '미지정'}"]
-    if fixed_rooms and avail_bbox is not None:
-        ax0, ay0, ax1, ay1 = avail_bbox
+    lines.append(
+        f"[배치 가능 전체 영역 bbox] 좌상단 ({int(bx0)},{int(by0)}) ~ 우하단 ({int(bx1)},{int(by1)}) "
+        f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
+        f"전용면적 약 {area_m2}㎡"
+    )
+
+    if fixed_rooms:
         lines.append(
-            f"[사용가능영역 bbox] 좌상단 ({int(ax0)},{int(ay0)}) ~ 우하단 ({int(ax1)},{int(ay1)}) "
-            f"= 가로 {round((ax1 - ax0) / 1000, 2)}m × 세로 {round((ay1 - ay0) / 1000, 2)}m"
+            "[★이미 점유된 구역 — 아래 각 구역과 1mm라도 겹치는 방을 절대 만들지 마라]"
         )
-        lines.append("[이미 고정된 공간 — 침범·재생성 금지]")
         for fr in fixed_rooms:
             fxs = [float(p[0]) for p in fr.get("poly") or []]
             fys = [float(p[1]) for p in fr.get("poly") or []]
-            if fxs and fys:
-                lines.append(
-                    f"  · {str(fr.get('name') or '고정방')}: 영역 bbox "
-                    f"({int(min(fxs))},{int(min(fys))})~({int(max(fxs))},{int(max(fys))})"
-                )
+            if not fxs or not fys:
+                continue
+            # 100mm 격자 스냅: 아래쪽 floor, 위쪽 ceil → 고정 방 bbox를 완전히 포함
+            gx0 = int(min(fxs) / 100) * 100
+            gy0 = int(min(fys) / 100) * 100
+            gx1 = _math.ceil(max(fxs) / 100) * 100
+            gy1 = _math.ceil(max(fys) / 100) * 100
+            name = str(fr.get("name") or "고정방")
+            lines.append(
+                f"  · [{name}] 점유 구역: x∈[{gx0},{gx1}], y∈[{gy0},{gy1}]\n"
+                f"    새 방 rect(x,y,w,h)가 이 구역과 겹치지 않으려면:\n"
+                f"    (x+w<={gx0}) 또는 (x>={gx1}) 또는 (y+h<={gy0}) 또는 (y>={gy1}) 중 하나 만족 필수."
+            )
+        fixed_label = "·".join(fixed_names) if fixed_names else "고정 공간"
         lines.append(
-            f"[요청] 위 '사용가능영역 bbox' 안에서, 이미 고정된 영역은 절대 침범하지 말고 "
+            f"[요청] 위 '배치 가능 전체 영역 bbox' 안에서, 위의 점유 구역을 침범하지 말고 "
             f"나머지 빈 공간에만 침실 {rooms}개, 욕실 {baths}개 + 공용공간({public_str})을 "
-            f"직사각형으로 배치하라. 이미 고정된 용도는 다시 만들지 마라. 거실을 동선 허브로 "
-            f"모든 공간이 거실에 접하게 하고, 방 사이 빈틈 없이 변을 공유하라. JSON rooms만 출력."
+            f"직사각형으로 배치하라. {fixed_label}은 이미 배치됐으니 다시 만들지 마라. "
+            f"거실을 동선 허브로 모든 공간이 거실에 접하게 하고, 방 사이 빈틈 없이 변을 공유하라. "
+            f"JSON rooms만 출력."
         )
     else:
         coords = ", ".join(f"[{int(round(x))},{int(round(y))}]" for x, y in boundary)
-        lines.append(
-            f"[외곽 bbox] 좌상단 ({int(bx0)},{int(by0)}) ~ 우하단 ({int(bx1)},{int(by1)}) "
-            f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
-            f"전용면적 약 {area_m2}㎡"
-        )
         lines.append(f"[외곽 폴리곤 좌표(mm)]\n[{coords}]")
         lines.append(
             f"[요청] 이 외곽 안에 침실 {rooms}개, 욕실 {baths}개 + 기본 공용공간({public_str})을 "

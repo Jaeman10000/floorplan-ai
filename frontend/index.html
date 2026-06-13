@@ -998,7 +998,7 @@ const ROOM_PALETTE = [
   0xc24fa8, 0x9bbf3a, 0xd98aa8, 0x3a8a7a, 0xb09ad0, 0xa87a3a,
   0xb04a4a, 0x6a8a4a, 0x5a9ad0, 0xc0a040,
 ];
-const _LOCK_COLOR = 0x64748b;   // 고정(잠긴) 방 표시색 — 슬레이트
+const _LOCK_COLOR = 0xfbbf24;   // 고정(잠긴) 방 표시색 — 앰버 노란색 (눈에 띄게)
 const _FACE_SELECT_COLOR = 0xffd700;  // 고정 모드에서 선택된 면 강조색 — 금색
 
 // ── Three.js: 벡터 PDF 파싱 결과 렌더 (외곽+내벽+방+이름) ──────────────────
@@ -1938,11 +1938,20 @@ function renderDesignRooms() {
     const shape = new THREE.Shape(rm.poly.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)));
     const tile = new THREE.Mesh(new THREE.ShapeGeometry(shape),
       new THREE.MeshBasicMaterial({ color: selected ? _FACE_SELECT_COLOR : rm.color,
-                                    transparent: true, opacity: selected ? 0.85 : (rm.locked ? 0.62 : 0.5),
+                                    transparent: true, opacity: selected ? 0.85 : (rm.locked ? 0.78 : 0.5),
                                     side: THREE.DoubleSide }));
     tile.rotation.x = Math.PI / 2; tile.position.y = 0.02;
     tile.userData.faceIdx = i;
     designGroup.add(tile); _designRoomMeshes.push(tile); _designRoomTiles.push(tile);
+    // 잠긴 방: 금색 바닥 테두리 라인 (눈에 띄게)
+    if (rm.locked) {
+      const pts = rm.poly.map(p => new THREE.Vector3(p[0] / 1000, 0.035, p[1] / 1000));
+      pts.push(pts[0].clone());
+      const linGeo = new THREE.BufferGeometry().setFromPoints(pts);
+      const lin = new THREE.Line(linGeo, new THREE.LineBasicMaterial({ color: 0xffd700, depthTest: false }));
+      lin.renderOrder = 997;
+      designGroup.add(lin); _designRoomMeshes.push(lin);
+    }
     const c = polyCentroid(rm.poly);
     const txt = rm.locked ? `🔒 ${rm.name || "고정"}\n${rm.area_m2}㎡`
                           : (rm.name ? `${rm.name}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`);
@@ -1984,11 +1993,13 @@ function renderFixedList() {
   if (!box) return;
   if (!designFixedRooms.length) { box.style.display = "none"; box.innerHTML = ""; return; }
   box.style.display = "block";
-  box.innerHTML = `<div style="font-size:11px; color:#9aa; margin:8px 0 4px;">🔒 고정 방 ${designFixedRooms.length}개</div>`;
+  box.innerHTML = `<div style="font-size:12px; font-weight:600; color:#fbbf24; margin:8px 0 6px;">🔒 고정된 방 (${designFixedRooms.length}개) — AI 배치 시 보존</div>`;
   designFixedRooms.forEach((fr, i) => {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex; align-items:center; justify-content:space-between; padding:4px 6px; background:#161a22; border-radius:6px; margin-bottom:4px;";
-    const nm = document.createElement("span"); nm.textContent = `🔒 ${fr.name}`;
+    row.style.cssText = "display:flex; align-items:center; justify-content:space-between; padding:5px 8px; background:#1e1b04; border:1px solid #fbbf24; border-radius:6px; margin-bottom:5px;";
+    const nm = document.createElement("span");
+    nm.style.cssText = "color:#ffd700; font-weight:600; font-size:12px;";
+    nm.textContent = `🔒 ${fr.name} ✓`;
     const btn = document.createElement("button");
     btn.textContent = "🔓 해제"; btn.className = "btn-secondary";
     btn.style.cssText = "padding:4px 8px; border-radius:6px; font-size:11px; cursor:pointer;";

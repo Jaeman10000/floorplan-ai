@@ -96,9 +96,14 @@ ck("고정 없을 때 현관 공용공간에 포함", "현관" in p_no)
 p_fix = S._build_layout_prompt(boundary, bbox, 80.0, "A", 2, 1,
                                fixed_rooms=[{"name": "현관", "poly": fixed[0]["poly"]}],
                                avail_bbox=(0, 0, 10000, 8000))
-ck("고정 시 '사용가능영역 bbox' 포함", "사용가능영역 bbox" in p_fix)
-ck("고정 시 '이미 고정된 공간' 섹션 포함", "이미 고정된 공간" in p_fix)
-ck("고정 현관은 만들 공용공간 목록(요청줄)에서 제외", "현관" not in p_fix.split("[요청]")[1])
+# 새 프롬프트: "배치 가능 전체 영역 bbox" + "이미 점유된 구역" + 비겹침 조건 형식
+ck("고정 시 '배치 가능 전체 영역 bbox' 포함", "배치 가능 전체 영역 bbox" in p_fix)
+ck("고정 시 '이미 점유된 구역' 섹션 포함", "이미 점유된 구역" in p_fix)
+ck("고정 시 격자 스냅 비겹침 조건 포함", "x+w<=" in p_fix or "x>=" in p_fix)
+# 새 프롬프트: 공용공간 목록(public_str)에 현관이 없어야 하고, [요청]에는 "이미 배치됐으니 다시 만들지 마라" 형태로만 언급
+req_part = p_fix.split("[요청]")[1] if "[요청]" in p_fix else ""
+ck("공용공간 목록(공용공간(...))에서 현관 제외", "현관" not in (req_part.split("공용공간(")[1].split(")")[0] if "공용공간(" in req_part else ""))
+ck("요청줄에 '다시 만들지 마라' 포함 (재생성 금지 명시)", "다시 만들지 마라" in req_part)
 ck("고정 시에도 거실은 만들 공용공간에 남음", "거실" in p_fix.split("[요청]")[1])
 
 print(f"\n=== PASS {len(PASS)} / FAIL {len(FAIL)} ===")
