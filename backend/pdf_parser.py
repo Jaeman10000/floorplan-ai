@@ -67,6 +67,12 @@ _BIG_ELEM_FRAC = 0.7             # 자기 bbox가 페이지의 이 비율↑ 단
 _WALL_SEAL_PT = 1.5              # stroke 벽 이음매 봉합 closing(pt)
 _BUILDING_MERGE_PT = 15.0        # 방들을 건물 한 덩어리로 묶는 closing(pt) — 가짜방 필터용
 
+# 가구/설비 필터 (식탁·싱크대·조리대·신발장·욕조·변기 등 — 구조벽 아님, 3D 제외)
+_FURN_BLOB_MM = 250.0            # opening 커널: 두 방향 모두 이보다 굵은 솔리드 = 설비/가구
+                                 # 덩어리(욕조·변기·세면대·싱크대·식탁). 가는 구조벽 제외
+_FURN_MAX_M2 = 4.0              # 이보다 큰 솔리드 덩어리는 가구로 안 봄(놓친 방·구조 보호)
+_FURN_RASTER_PXMM = 0.1        # 가구 병합용 래스터 해상도(px/mm) — 10mm/px
+
 # 방 이름 텍스트 키워드 (실제 텍스트로 들어있는 도면용)
 _ROOM_NAME_KEYWORDS = ["거실", "침실", "욕실", "주방", "현관",
                        "발코니", "파우더룸", "다용도실", "테라스"]
@@ -221,13 +227,12 @@ def _wall_mask_raster(page, sc: float, shape) -> np.ndarray:
     return wall
 
 
-def _extract_rooms_pt(page, outline_pt: List[Tuple[float, float]]) -> List[dict]:
+def _extract_rooms_pt(page, outline_pt: List[Tuple[float, float]], s: float) -> List[dict]:
     """
     벽 선들의 planar subdivision으로 건물 내부를 방 단위로 분리.
     방 = (건물 내부 마스크) − (벽 마스크)의 연결요소.
 
-    반환: [{contour_pt: [(x,y)...], area_m2_px: float}, ...] (PDF pt, y-down)
-    area_m2_px 는 픽셀 개수 기반 실제 면적(단순화 폴리곤보다 정확).
+    반환: [{contour_pt: [(x,y)...], area_pt2: float}, ...] (PDF pt, y-down)
     ⚠️ 문 개구부에서 벽이 끊기면 인접 공간이 한 방으로 병합될 수 있다(v1 한계).
     """
     W, H = float(page.width), float(page.height)
@@ -246,26 +251,7 @@ def _extract_rooms_pt(page, outline_pt: List[Tuple[float, float]]) -> List[dict]
             cv2.getStructuringElement(cv2.MORPH_RECT, (_ROOM_OPEN_PX, _ROOM_OPEN_PX)),
         )
 
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(free, 4)
-    px_to_m2 = (1.0 / (sc * sc))  # px² → pt²;  pt²→m² 은 호출측에서 s² 곱
-
-    rooms = []
-    eps = _ROOM_EPS_PT * sc
-    for i in range(1, n):
-        area_px = float(stats[i, cv2.CC_STAT_AREA])
-        comp = (labels == i).astype(np.uint8) * 255
-        cnts, _h = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        c = max(cnts, key=cv2.contourArea)
-        approx = cv2.approxPolyDP(c, eps, True)
-        if len(approx) < 3:
-            continue
-        rooms.append({
-            "contour_pt": [(float(p[0][0]) / sc, float(p[0][1]) / sc) for p in approx],
-            "area_pt2": area_px * px_to_m2,
-        })
-    return rooms
+    return _free_components_to_rooms(free, sc, s)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -292,6 +278,136 @@ def _room_name_words(page) -> List[dict]:
                 })
                 break
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 가구/설비 필터 (방으로 안 잡힌 가구 footprint 를 방 폴리곤에 병합)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _merge_furniture_into_rooms(outline_mm: List[Tuple[float, float]],
+                                rooms: List[dict]) -> int:
+    """
+    방으로 안 잡혀 3D에서 솔리드 블록으로 남는 가구/설비(식탁·싱크대·조리대·
+    신발장·욕조·변기)를, 그것을 둘러싼 방 폴리곤에 합쳐 없앤다. rooms 를 in-place
+    수정하고 병합한 덩어리 수를 반환.
+
+    원리: 3D 벽 = 외곽 − 방(구멍) 압출. 즉 (건물내부 − 방폴리곤)이 솔리드로 남는데
+    이는 '구조벽 + 가구 footprint'다.
+      · 구조벽은 가늘고 길다(선형) → opening(침식→팽창)에서 사라진다.
+      · 가구/설비는 2D 덩어리 → opening에서 살아남는다(방 폴리곤이 노치로 배제하므로
+        윤곽선만 그린 가구도 footprint 전체가 솔리드로 잡힘).
+    살아남은 덩어리를 인접 방 폴리곤에 union 하면 그 방이 footprint를 덮어 3D
+    블록이 사라진다. 가는 벽은 안 건드리므로 방이 합쳐지거나 새지 않는다(구조 보존).
+
+    ⚠️ 한계: 두 방향 모두 _FURN_BLOB_MM↑로 굵은 구조 기둥은 가구로 오인될 수 있어
+            _FURN_MAX_M2 로 큰 덩어리는 제외(놓친 방·구조 코어 보호).
+    """
+    if not rooms:
+        return 0
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    msc = _FURN_RASTER_PXMM
+    Wp = int(max(p[0] for p in outline_mm) * msc) + 2
+    Hp = int(max(p[1] for p in outline_mm) * msc) + 2
+
+    def _raster(poly):
+        return np.array([[int(x * msc), int(y * msc)] for x, y in poly], np.int32)
+
+    bmask = np.zeros((Hp, Wp), np.uint8)
+    cv2.fillPoly(bmask, [_raster(outline_mm)], 255)
+    rmask = np.zeros((Hp, Wp), np.uint8)
+    for r in rooms:
+        cv2.fillPoly(rmask, [_raster(r["polygon_mm"])], 255)
+
+    solid = cv2.bitwise_and(bmask, cv2.bitwise_not(rmask))   # 구조벽 + 가구 footprint
+    k = max(3, int(_FURN_BLOB_MM * msc))
+    blobs = cv2.morphologyEx(
+        solid, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    cnts, _h = cv2.findContours(blobs, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    shp = []
+    for r in rooms:
+        try:
+            shp.append(Polygon(r["polygon_mm"]).buffer(0))
+        except Exception:
+            shp.append(None)
+
+    merged = 0
+    for c in cnts:
+        ap = cv2.approxPolyDP(c, 2.0, True)
+        pts = [(float(p[0][0]) / msc, float(p[0][1]) / msc) for p in ap]
+        if len(pts) < 3:
+            continue
+        try:
+            blk = Polygon(pts).buffer(0)
+        except Exception:
+            continue
+        a_m2 = blk.area / 1e6
+        if a_m2 < _ROOM_MIN_AREA_M2 * 0.3 or a_m2 > _FURN_MAX_M2:
+            continue
+        # 이 덩어리를 둘러싼(가장 많이 겹치는) 방 찾기 — 벽 두께만큼 부풀려 닿게
+        probe = blk.buffer(_FURN_BLOB_MM)
+        best, bi = 0.0, None
+        for i, p in enumerate(shp):
+            if p is None or p.is_empty:
+                continue
+            inter = p.intersection(probe).area
+            if inter > best:
+                best, bi = inter, i
+        if bi is None:
+            continue
+        # 방 + 덩어리 union(틈은 60mm 부풀려 메움) → 구멍은 외곽만 취해 채움
+        u = unary_union([shp[bi], blk.buffer(60.0)]).buffer(0)
+        if u.geom_type == "MultiPolygon":
+            u = max(u.geoms, key=lambda g: g.area)
+        if u.geom_type == "Polygon":
+            shp[bi] = Polygon(u.exterior)  # 내부 구멍 채움
+            merged += 1
+
+    for i, r in enumerate(rooms):
+        p = shp[i]
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        p = p.simplify(20.0)
+        r["polygon_mm"] = [(round(x, 1), round(y, 1)) for x, y in list(p.exterior.coords)[:-1]]
+        r["area_m2"] = round(p.area / 1e6, 2)
+    return merged
+
+
+def _free_components_to_rooms(free: np.ndarray, sc: float, s: float,
+                             in_bmask: Optional[np.ndarray] = None) -> List[dict]:
+    """
+    free 의 연결요소를 방으로 추출. 이미지 경계에 닿거나 _ROOM_MIN_AREA_M2 미만은
+    제외. in_bmask 가 주어지면 중심이 그 건물 blob 안인 것만 채택(stroke 경로).
+    반환: [{contour_pt:[(x,y)...], area_pt2}, ...] (PDF pt, y-down)
+    """
+    n, labels, stats, cent = cv2.connectedComponentsWithStats(free, 4)
+    border = (set(labels[0, :]) | set(labels[-1, :]) |
+              set(labels[:, 0]) | set(labels[:, -1]))
+    px_to_m2 = 1.0 / (sc * sc) * s * s / 1e6
+    eps = _ROOM_EPS_PT * sc
+    rooms = []
+    for i in range(1, n):
+        if i in border or stats[i, cv2.CC_STAT_AREA] * px_to_m2 < _ROOM_MIN_AREA_M2:
+            continue
+        if in_bmask is not None:
+            cx, cy = cent[i]
+            if in_bmask[int(cy), int(cx)] == 0:
+                continue
+        comp = (labels == i).astype(np.uint8) * 255
+        cnts, _h = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        c = max(cnts, key=cv2.contourArea)
+        approx = cv2.approxPolyDP(c, eps, True)
+        if len(approx) < 3:
+            continue
+        rooms.append({
+            "contour_pt": [(float(p[0][0]) / sc, float(p[0][1]) / sc) for p in approx],
+            "area_pt2": float(stats[i, cv2.CC_STAT_AREA]) / (sc * sc),
+        })
+    return rooms
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,25 +497,8 @@ def _stroke_building_and_rooms(page, s: float):
         ap = cv2.approxPolyDP(main, _OUTLINE_EPS_PT * sc, True)
         outline_pt = [(float(q[0][0]) / sc, float(q[0][1]) / sc) for q in ap]
 
-    # 건물 blob 안의 방만 채택
-    rooms = []
-    eps = _ROOM_EPS_PT * sc
-    for i in cand:
-        cx, cy = cent[i]
-        if bmask[int(cy), int(cx)] == 0:
-            continue
-        comp = (labels == i).astype(np.uint8) * 255
-        cnts, _h = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        c = max(cnts, key=cv2.contourArea)
-        approx = cv2.approxPolyDP(c, eps, True)
-        if len(approx) < 3:
-            continue
-        rooms.append({
-            "contour_pt": [(float(p[0][0]) / sc, float(p[0][1]) / sc) for p in approx],
-            "area_pt2": float(stats[i, cv2.CC_STAT_AREA]) / (sc * sc),
-        })
+    # 건물 blob 안의 방 채택
+    rooms = _free_components_to_rooms(free, sc, s, in_bmask=bmask)
     return outline_pt, rooms
 
 
@@ -493,7 +592,7 @@ def parse_pdf(path: str, page_index: int = 0) -> Dict[str, Any]:
 
     if outline_pt and fills_area >= _MIN_BUILDING_M2:
         wall_repr = "fill"
-        room_src = _extract_rooms_pt(page, outline_pt)
+        room_src = _extract_rooms_pt(page, outline_pt, s)
     else:
         wall_repr = "stroke"
         warnings.append("벽이 선(stroke)으로 그려진 도면 — stroke 기반 외곽/방 추출 경로 사용")
@@ -549,6 +648,11 @@ def parse_pdf(path: str, page_index: int = 0) -> Dict[str, Any]:
             "polygon_mm": poly,
             "area_m2": round(a_m2, 2),
         })
+
+    # 가구/설비(식탁·싱크대·욕조 등) footprint 를 인접 방에 병합 → 3D 솔리드 블록 제거
+    n_furn = _merge_furniture_into_rooms(outline_mm, rooms)
+    if n_furn:
+        warnings.append(f"가구/설비 덩어리 {n_furn}개를 방에 병합(3D 블록 제거)")
 
     title_text = _title_block_text(page)
 
