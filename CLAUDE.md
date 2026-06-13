@@ -581,6 +581,50 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         고정 2개(현관+다용도실)로도 1회. **오피스텔로도 1회**. 통과 전 미완료.
       ⚠️ **ANTHROPIC_API_KEY 필요**(ai-advice·genlayout과 동일). 자동검증은 목으로 키 없이 가능.
       ⚠️ **잠긴 방 위에 새 벽 그어 면 쪼개기 가드는 아직 없음**(다음 증분).
+- [x] **AI 배치에 건축 규칙 강제 + 방위(향) 반영**(AI가 건축 상식 없이 막 배치하던 문제 — 거실이
+      한가운데 갇혀 채광 없음·욕실 1.7㎡ 규격 미달 등 해결). **프롬프트 명문화 + 백엔드 검증/재생성
+      (HARD 위반 시 최대 3회) + 방위 기반 배치**의 이중 구조. 외부 데이터 학습 안 함(규칙 코드화).
+      **건축 규격 상수**(`_ARCH`, 보편 기준·하드코딩 아님): 침실 폭2400/7㎡/채광HARD, 욕실 1500×2000/
+        3㎡, 주방 폭1800, 거실 한 변3300/12㎡/채광HARD, 동선900(프롬프트만). `_room_category`(★주방을
+        '방'보다 먼저 매칭 — '주방'⊃'방').
+      **채광 판정**(`_touches_outer`): 방 exterior ∩ 세대외곽(bpoly) exterior 공유 변 길이≥1m. 기준=
+        **세대 외곽 bpoly**(avail 아님), buffer(50) 노이즈 보정. 거실·침실=채광 필수(HARD), 욕실·주방·
+        다용도=내부 가능.
+      **검증/재생성**(`_validate_layout`→`_generate_with_retries`, caller 주입 가능=키 없이 단위검증):
+        HARD=거실 채광+규격·침실 각각 채광+규격·욕실 규격·주방 폭(+거실 없음). HARD 0이면 즉시 채택,
+        아니면 `_violations_feedback`(구체 위반+직전 방 좌표)를 붙여 재요청, 3회 후 best(min HARD,SOFT,
+        −방수)+`ok=false`. 서버 콘솔에 attempt별 위반 로그. 422(파싱·생존0) 보존. SOFT=배관 인접
+        (`_water_connected`)·개수 불일치·방위 부적합(과한 HARD는 루프 폭주라 SOFT). ★"침실 채광 독점·
+        거실 가두기 금지"는 **거실 채광 HARD에 자동 포함**(거실이 외벽에 닿아야 하므로) — 별도 룰 없음.
+      **방위**(이미 ai-advice엔 building_orientation으로 있던 걸 generate-layout에 연결): `_edge_directions`
+        ("도면 위쪽=orientation"→외곽 4변 방위, 시계 북→동→남→서; mm는 작은 y=상단). `_room_facings`로
+        방이 닿는 변 방향. 방향별 SOFT+프롬프트: 남=거실/침실, 북=물공간, 동=침실, 서=거실 과열주의.
+        **모름이면 방향 강화 생략**(채광 유무만). 프런트: AI 초안 박스에 방위 셀렉트 신설(`#design-
+        orientation-select`), 기존 `#orientation-select`와 **양방향 동기화**, generateLayout이 설계
+        셀렉트 우선 읽어 body.building_orientation 전송.
+      **공용화**: `_clipped_rooms(rects, clip_region)`→[{name,poly,area_m2,grid_bbox}] 신설, 검증과
+        `_rects_to_rooms_and_walls`가 같은 기하 사용(반환 **2-tuple 보존** → 기존 호출부/테스트 무영향).
+      **프런트 로딩**: 문구 "채광·규격·방위·동선 검증·재생성 — 최대 ~40초", 버튼 경과초, AbortController
+        90초. 응답 `warnings/ok/attempts` 추가(기존 키 유지=하위호환), `data.warnings||[]`·`ok!==false`
+        안전 처리, 경고 있으면 "⚠️ 일부 규칙 미충족:…직접 보정". `_LAYOUT_SYSTEM`에 규격·채광·방위·배관·
+        거실 가두기 금지 명문화(규칙11~15). `_build_layout_prompt(building_orientation,feedback)` — 방위
+        변별 방향+좌표 힌트, 재생성 피드백 지점. **기존 문구(침실N/욕실M/빈틈) 보존**.
+      무수정: 고정방 빼기(avail)·clip_poly·_postprocess_walls·클릭클릭·undo·autosave·묶기 localStorage·
+        내보내기·renderToBe·beforeunload·recomputeDesignRooms·ensureLockedWalls. _rects_to_rooms_and_walls arity 보존.
+      검증: ①(자동) `_verify_archrules_backend.py`(40/40) — _room_category 우선순위·_touches_outer(외벽T/
+        가운데F)·_edge_directions 4방위 회전·_room_facings·_validate_layout(나쁜배치 HARD 4종 검출/좋은
+        배치 HARD0/방위남 거실북향만→SOFT/모름이면 orient 없음)·_violations_feedback·_generate_with_retries
+        (나쁨2+좋음→3회째 멈춤 ok=True / 나쁨×3→best+ok=false warn5 / 첫시도좋음 1회 / 전부파싱실패 None).
+        ②(자동) `_verify_genlayout.py` 확장 — body에 building_orientation='남' 실림·방위 셀렉트 동기화·
+        warnings/ok=false여도 주입+경고 상태표시. 회귀(_verify_genlayout_backend 23·_verify_fixedlayout_
+        backend 23·_verify_fixedlayout·_verify_fixedroom·_verify_clickdraw·_verify_export) 전부 통과.
+        ③(JJ 수동·필수, 실제 키) **방위 남→A세대 침실3 욕실1 생성**→ⓐ거실·침실 남쪽·물공간 북쪽 ⓑ거실
+        채광 닿음 ⓒ욕실≥3㎡·침실 쓸 폭 ⓓ경고 내용 ⓔ**서버 콘솔 attempt 1/2/3 재생성 로그** / 방위 모름
+        1회 / 고정 2개·**오피스텔** 각 1회. 통과 전 미완료.
+      ⚠️ **채광 한계(다음 증분 후보)**: 채광=세대 외곽 접함만 봄 → 옆세대와 맞붙는 경계벽도 채광으로
+        오판. **세대 묶기 정보로 맞붙는 변=경계벽=채광 제외** 계산 가능(다음 증분). 비직사각 외곽의
+        방향 facing·L자 clip 폭은 bbox 근사(AI는 직사각형이라 대부분 정확). 동선 0.9m는 프롬프트만.
+- [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)
 

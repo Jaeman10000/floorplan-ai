@@ -250,6 +250,213 @@ async def unit_boundary(payload: dict):
 
 _GRID_MM = 100  # 벽 좌표 스냅 격자
 
+# ── 건축 규격 최소 기준 (mm·㎡, 보편 주거 기준 — 도면 무관, 하드코딩 아님) ──────
+#   min_w: 폭 최소(거실은 '한 변'=긴 변, 그 외는 '짧은 변') / min_area: 면적 최소
+#   daylight: 외벽(세대 외곽)에 접해 채광 가능해야 하는가 (HARD)
+_ARCH = {
+    "bedroom": {"min_w": 2400, "min_area": 7.0,  "daylight": True},
+    "bath":    {"min_w": 1500, "min_area": 3.0,  "daylight": False},
+    "kitchen": {"min_w": 1800, "min_area": 0.0,  "daylight": False},
+    "living":  {"min_w": 3300, "min_area": 12.0, "daylight": True},
+    "entry":   {"min_w": 0,    "min_area": 0.0,  "daylight": False},
+    "utility": {"min_w": 0,    "min_area": 0.0,  "daylight": False},
+    "balcony": {"min_w": 0,    "min_area": 0.0,  "daylight": False},
+    "other":   {"min_w": 0,    "min_area": 0.0,  "daylight": False},
+}
+_DAYLIGHT_MIN_LEN = 1000      # 채광면 인정 최소 공유 변 길이(mm)
+_WATER_CATS = ("bath", "kitchen", "utility")   # 물 쓰는 공간(배관 인접 대상)
+_CORRIDOR_MIN = 900           # 동선 폭 최소(mm) — 프롬프트만, 자동검증 안 함
+
+
+def _room_category(name):
+    """방 이름 → 용도 카테고리. ★순서 주의: '주방'은 '방'을 포함하므로 주방을 먼저 매칭."""
+    n = (name or "").strip()
+    nu = n.upper()
+    if any(k in n for k in ("주방", "부엌")):
+        return "kitchen"
+    if ("거실" in n) or ("LDK" in nu) or ("리빙" in n):
+        return "living"
+    if any(k in n for k in ("욕실", "화장실", "세면", "샤워")):
+        return "bath"
+    if any(k in n for k in ("다용도", "팬트리", "창고", "드레스", "보일러", "세탁")):
+        return "utility"
+    if "현관" in n:
+        return "entry"
+    if any(k in n for k in ("발코니", "베란다")):
+        return "balcony"
+    if any(k in n for k in ("침실", "안방", "방")):
+        return "bedroom"
+    return "other"
+
+
+def _poly_sides(poly):
+    x0, y0, x1, y1 = poly.bounds
+    return (x1 - x0), (y1 - y0)
+
+
+def _short_side(poly):
+    w, h = _poly_sides(poly)
+    return min(w, h)
+
+
+def _long_side(poly):
+    w, h = _poly_sides(poly)
+    return max(w, h)
+
+
+def _line_len(geom):
+    """LineString/MultiLineString/GeometryCollection의 선 길이 합 (점은 무시)."""
+    if geom is None or geom.is_empty:
+        return 0.0
+    gt = geom.geom_type
+    if gt == "LineString":
+        return geom.length
+    if gt in ("MultiLineString", "GeometryCollection"):
+        return sum(g.length for g in geom.geoms if g.geom_type in ("LineString", "MultiLineString"))
+    return 0.0
+
+
+def _touches_outer(room_poly, outline_poly, min_len=_DAYLIGHT_MIN_LEN):
+    """방이 세대 외곽 경계에 min_len(기본 1m) 이상 접하면 채광면 있음 → True.
+    기준=outline_poly(세대 외곽 bpoly, avail 아님). 노이즈 대비 buffer(50) 보정."""
+    try:
+        shared = room_poly.exterior.intersection(outline_poly.exterior)
+        if _line_len(shared) >= min_len:
+            return True
+        band = outline_poly.exterior.buffer(50)
+        return _line_len(room_poly.exterior.intersection(band)) >= min_len
+    except Exception:
+        return False
+
+
+def _edge_directions(orientation):
+    """'도면 위쪽=orientation'에서 외곽 bbox 4변의 방위.
+    mm 규약: top=작은 y(도면 상단), bottom=큰 y, left=작은 x, right=큰 x.
+    시계방향(top→right→bottom→left) = 나침반(북→동→남→서). 모름이면 None."""
+    o = (orientation or "").strip()
+    compass = ["북", "동", "남", "서"]
+    if o not in compass:
+        return None
+    i = compass.index(o)
+    return {
+        "top":    compass[i],
+        "right":  compass[(i + 1) % 4],
+        "bottom": compass[(i + 2) % 4],
+        "left":   compass[(i + 3) % 4],
+    }
+
+
+def _room_facings(room_poly, outline_poly, edge_dirs, min_len=_DAYLIGHT_MIN_LEN, tol=120):
+    """방이 외곽 bbox의 어느 변에 (실제 외벽 길이로) 접하는지 → 방위 집합.
+    edge_dirs None이거나 채광 접함이 없으면 빈 set. (비직사각 외곽은 bbox 변 근사.)"""
+    if not edge_dirs:
+        return set()
+    if not _touches_outer(room_poly, outline_poly, min_len):
+        return set()
+    ox0, oy0, ox1, oy1 = outline_poly.bounds
+    rx0, ry0, rx1, ry1 = room_poly.bounds
+    rw, rh = (rx1 - rx0), (ry1 - ry0)
+    f = set()
+    if abs(ry0 - oy0) <= tol and rw >= min_len:
+        f.add(edge_dirs["top"])
+    if abs(ry1 - oy1) <= tol and rw >= min_len:
+        f.add(edge_dirs["bottom"])
+    if abs(rx0 - ox0) <= tol and rh >= min_len:
+        f.add(edge_dirs["left"])
+    if abs(rx1 - ox1) <= tol and rh >= min_len:
+        f.add(edge_dirs["right"])
+    return f
+
+
+def _water_connected(polys):
+    """물 쓰는 공간들이 서로 인접(배관 효율)하면 True. buffer(60)로 격자 근접 인정."""
+    from shapely.ops import unary_union
+    try:
+        u = unary_union([p.buffer(60) for p in polys])
+        return u.geom_type == "Polygon"
+    except Exception:
+        return True   # 판정 불가 시 경고 안 냄
+
+
+def _orientation_violations(clipped, outline_poly, edge_dirs):
+    """방위별 배치 SOFT 검증: 거실이 남향 미접 / 물공간이 남향 점유."""
+    V = []
+    living_exists, living_faces, water_on_south = False, set(), []
+    for c in clipped:
+        cat = _room_category(c["name"])
+        faces = _room_facings(c["poly"], outline_poly, edge_dirs)
+        if cat == "living":
+            living_exists = True
+            living_faces |= faces
+        if cat in _WATER_CATS and "남" in faces:
+            water_on_south.append(c["name"])
+    if living_exists and "남" not in living_faces:
+        V.append({"severity": "soft", "cat": "living", "name": "거실", "rule": "orient",
+                  "msg": "거실이 남향 외벽에 닿지 않음 (가능하면 남향 배치 권장)"})
+    if water_on_south:
+        nm = "·".join(water_on_south)
+        V.append({"severity": "soft", "cat": "water", "name": nm, "rule": "orient",
+                  "msg": f"물 쓰는 공간({nm})이 남향을 점유 (북향 권장)"})
+    return V
+
+
+def _validate_layout(clipped, outline_poly, bedrooms_req, baths_req, orientation=None):
+    """건축 규칙 검증 → violations 리스트 [{severity:'hard'|'soft', cat, name, rule, msg}].
+    채광 기준=outline_poly(세대 외곽). 방위 알면 방향별 SOFT 추가."""
+    edge_dirs = _edge_directions(orientation)
+    V, cats = [], []
+    for c in clipped:
+        cat = _room_category(c["name"])
+        cats.append(cat)
+        poly, nm = c["poly"], c["name"]
+        area = poly.area / 1e6
+        spec = _ARCH.get(cat, _ARCH["other"])
+        side = _long_side(poly) if cat == "living" else _short_side(poly)
+        if spec["min_w"] and side < spec["min_w"] - 1:
+            V.append({"severity": "hard", "cat": cat, "name": nm, "rule": "width",
+                      "msg": f"{nm} 폭 {side/1000:.2f}m < 최소 {spec['min_w']/1000:.1f}m"})
+        if spec["min_area"] and area < spec["min_area"] - 0.05:
+            V.append({"severity": "hard", "cat": cat, "name": nm, "rule": "area",
+                      "msg": f"{nm} 면적 {area:.1f}㎡ < 최소 {spec['min_area']:.0f}㎡"})
+        if spec["daylight"] and not _touches_outer(poly, outline_poly):
+            V.append({"severity": "hard", "cat": cat, "name": nm, "rule": "daylight",
+                      "msg": f"{nm}이(가) 외벽에 닿지 않아 채광이 없음"})
+    if "living" not in cats:
+        V.append({"severity": "hard", "cat": "living", "name": "거실", "rule": "missing",
+                  "msg": "거실이 없음 (채광·동선 허브 필수)"})
+    nbed = sum(1 for c in cats if c == "bedroom")
+    nbath = sum(1 for c in cats if c == "bath")
+    if nbed != bedrooms_req:
+        V.append({"severity": "soft", "cat": "bedroom", "name": "", "rule": "count",
+                  "msg": f"침실 {nbed}개 (요청 {bedrooms_req}개)"})
+    if nbath != baths_req:
+        V.append({"severity": "soft", "cat": "bath", "name": "", "rule": "count",
+                  "msg": f"욕실 {nbath}개 (요청 {baths_req}개)"})
+    water = [c["poly"] for c in clipped if _room_category(c["name"]) in _WATER_CATS]
+    if len(water) >= 2 and not _water_connected(water):
+        V.append({"severity": "soft", "cat": "water", "name": "", "rule": "plumbing",
+                  "msg": "물 쓰는 공간(욕실·주방·다용도)이 서로 떨어져 배관 비효율"})
+    if edge_dirs:
+        V += _orientation_violations(clipped, outline_poly, edge_dirs)
+    return V
+
+
+def _violations_feedback(violations, clipped):
+    """HARD 위반 → 재요청용 구체 피드백 텍스트(직전 배치 방 목록 동봉). HARD 없으면 ''."""
+    hard = [v for v in violations if v["severity"] == "hard"]
+    if not hard:
+        return ""
+    lines = ["[직전 시도의 규칙 위반 — 반드시 모두 고쳐라]"]
+    for v in hard:
+        lines.append(f"- {v['msg']}")
+    if clipped:
+        lines.append("[직전 배치 — 이 좌표를 수정해 위반을 해소하라]")
+        for c in clipped[:12]:
+            x0, y0, x1, y1 = c["grid_bbox"]
+            lines.append(f"  · {c['name']}: x∈[{x0},{x1}], y∈[{y0},{y1}] ({c['area_m2']}㎡)")
+    lines.append("위 위반을 모두 고쳐 다시 JSON rooms만 출력하라.")
+    return "\n".join(lines)
+
 
 def _default_room_counts(area_m2):
     """세대 전용면적(㎡) 기반 방/화장실 기본값 — JJ가 개수를 비웠을 때만 사용.
@@ -289,6 +496,17 @@ _LAYOUT_SYSTEM = (
     "수 없으므로). 방과 방 사이에는 절대 빈틈이 없어야 한다.\n"
     "9. 방끼리 겹치지 마라(겹치면 면이 엉킨다).\n"
     "10. 일반 주거 상식: 거실/LDK는 크게, 침실 9~12㎡, 욕실 4~5㎡, 현관/다용도실은 작게.\n"
+    "[건축 규격·채광·방위 — 반드시 지킴]\n"
+    "11. 규격 최소치(미달 시 거부됨): 침실은 폭(짧은 변) 2.4m·면적 7㎡ 이상, "
+    "욕실은 1.5m×2.0m(3㎡) 이상, 주방은 폭 1.8m 이상, 거실은 한 변 3.3m·면적 12㎡ 이상, "
+    "통로(동선) 폭 0.9m 이상.\n"
+    "12. 채광: 거실과 모든 침실은 외곽 경계(외벽)에 한 변이 닿아 창을 낼 수 있어야 한다. "
+    "욕실·주방·다용도실은 내부(외벽 비접)에 둬도 된다.\n"
+    "13. 거실을 건물 한가운데 가두지 마라: 침실이 외벽을 독점하고 거실이 속에 갇히면 안 된다. "
+    "거실이 먼저 외벽 채광을 확보하고, 침실은 남는 외벽에 배치한다.\n"
+    "14. 배관 효율: 물 쓰는 공간(욕실·주방·다용도실)은 서로 인접 배치한다.\n"
+    "15. 방위가 주어지면: 남향 외벽=거실·침실 우선, 북향=욕실·주방·다용도실, "
+    "동향=침실(아침 햇빛), 서향=거실 가능하나 과열 주의.\n"
     "[출력] 오직 JSON만. 산문·설명·마크다운 펜스 금지. 형식:\n"
     '{"rooms":[{"name":"거실","x":0,"y":0,"w":4000,"h":3000}, ...]}  '
     "(x,y=좌상단 mm, w=너비, h=높이, 모두 100의 배수 정수)"
@@ -296,11 +514,14 @@ _LAYOUT_SYSTEM = (
 
 
 def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
-                         fixed_rooms=None, avail_bbox=None):
+                         fixed_rooms=None, avail_bbox=None,
+                         building_orientation=None, feedback=None):
     """레이아웃 생성 프롬프트.
     고정 방이 있으면 전체 외곽 bbox + 점유 구역을 100mm 격자 스냅 좌표 + 비겹침 조건으로
     명시. 'avail_bbox'는 고정방 제거 후에도 외곽과 거의 같아 AI에게 misleading → 사용 안 함.
-    실제 방어선은 백엔드의 avail 교차 클립(이중 안전망)."""
+    실제 방어선은 백엔드의 avail 교차 클립(이중 안전망).
+    building_orientation: '북/남/동/서'면 외곽 변별 방위 + 방향별 배치 힌트 삽입(모름이면 생략).
+    feedback: 재생성 시 직전 시도 위반 텍스트(있으면 맨 끝에 첨부)."""
     import math as _math
     bx0, by0, bx1, by1 = bbox
     fixed_rooms = fixed_rooms or []
@@ -317,6 +538,23 @@ def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
         f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
         f"전용면적 약 {area_m2}㎡"
     )
+
+    # 방위: 외곽 4변에 방위 라벨 + 방향별 배치 힌트
+    ed = _edge_directions(building_orientation)
+    if ed:
+        side_label = {"top": f"상단변 y≈{int(by0)}", "bottom": f"하단변 y≈{int(by1)}",
+                      "left": f"좌변 x≈{int(bx0)}", "right": f"우변 x≈{int(bx1)}"}
+        side_of = {v: k for k, v in ed.items()}   # 방위 → 변
+        def _hint(d):
+            return side_label[side_of[d]] if d in side_of else "?"
+        lines.append(
+            f"[방위] 도면 위쪽(y 작은 쪽)={building_orientation}쪽. "
+            f"외곽 {side_label['top']}={ed['top']}, {side_label['bottom']}={ed['bottom']}, "
+            f"{side_label['left']}={ed['left']}, {side_label['right']}={ed['right']}.\n"
+            f"  · 거실·침실은 남향({_hint('남')}) 외벽에 붙여 채광을 확보하라.\n"
+            f"  · 욕실·주방·다용도실은 북향({_hint('북')})/내부에 배치하라.\n"
+            f"  · 동향({_hint('동')})=침실(아침 햇빛), 서향({_hint('서')})=거실 가능하나 과열 주의."
+        )
 
     if fixed_rooms:
         lines.append(
@@ -354,6 +592,8 @@ def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
             f"직사각형으로 배치하라. 거실을 동선 허브로 모든 공간이 거실에 접하게 하고, "
             f"방 사이 빈틈 없이 변을 공유하라. JSON rooms만 출력."
         )
+    if feedback:
+        lines.append(feedback)
     return "\n".join(lines)
 
 
@@ -394,21 +634,12 @@ def _parse_rooms_json(text):
     return out
 
 
-def _rects_to_rooms_and_walls(rects, boundary, clip_poly=None):
-    """AI 직사각형 목록 → (생존 방 리스트, 벽 선분 리스트).
-    각 rect: 100mm 격자 스냅 → 클립영역과 '정확 intersection'(영역 밖 통과 금지) →
-    area<1㎡면 버림 → representative_point(L자여도 내부 보장)로 중심.
-    생존한 rect의 격자 사각형 4변을 모아 _postprocess_walls(스냅·buffer50 클립·degenerate·
-    dedup)로 벽 생성 — 인접 방 공유변은 dedup으로 1개가 된다.
-    clip_poly: 주어지면(고정 방 제외한 사용가능영역, MultiPolygon 가능) 외곽 대신 이걸로
-    교차 클립 — 고정 영역과 겹치는 rect 부분은 잘려나간다(이중 안전망)."""
+def _clipped_rooms(rects, clip_region):
+    """AI rect 목록 → 생존 방 [{name, poly(shapely), area_m2, grid_bbox(x0,y0,x1,y1)}].
+    격자 스냅 → clip_region 교차 클립(영역 밖·고정 영역 통과 금지) → <1㎡ drop →
+    MultiPolygon이면 최대 조각. 검증·렌더가 같은 기하를 쓰도록 공용화한 헬퍼."""
     from shapely.geometry import Polygon
-    bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
-    if not bpoly.is_valid:
-        bpoly = bpoly.buffer(0)
-    clip_region = clip_poly if clip_poly is not None else bpoly
-
-    rooms_out, edge_segs = [], []
+    out = []
     for r in rects:
         x0 = _snap_grid(r["x"]); y0 = _snap_grid(r["y"])
         x1 = _snap_grid(r["x"] + r["w"]); y1 = _snap_grid(r["y"] + r["h"])
@@ -416,20 +647,42 @@ def _rects_to_rooms_and_walls(rects, boundary, clip_poly=None):
             continue
         rect = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
         try:
-            clip = rect.intersection(clip_region)   # buffer 없는 정확 클립 — 영역 밖·고정 영역 통과 금지
+            clip = rect.intersection(clip_region)   # buffer 없는 정확 클립
         except Exception:
             continue
         if clip.is_empty or clip.area < 1e6:   # <1㎡ 버림
             continue
         if clip.geom_type == "MultiPolygon":
             clip = max(clip.geoms, key=lambda g: g.area)
-        pt = clip.representative_point()       # 항상 내부의 점
-        rooms_out.append({
-            "name": r["name"],
-            "cx": round(pt.x, 1), "cy": round(pt.y, 1),
+        out.append({
+            "name": r["name"], "poly": clip,
             "area_m2": round(clip.area / 1e6, 2),
+            "grid_bbox": (x0, y0, x1, y1),
         })
-        # 격자 사각형 4변 (클립 전) — 벽 선분 후보
+    return out
+
+
+def _rects_to_rooms_and_walls(rects, boundary, clip_poly=None):
+    """AI 직사각형 목록 → (생존 방 리스트, 벽 선분 리스트).
+    _clipped_rooms로 생존 방을 구한 뒤 representative_point로 중심, 생존 rect의 격자 4변을
+    모아 _postprocess_walls로 벽 생성(인접 공유변은 dedup으로 1개). 반환 2-tuple 보존.
+    clip_poly: 주어지면(고정 방 제외 사용가능영역) 외곽 대신 이걸로 교차 클립(이중 안전망)."""
+    from shapely.geometry import Polygon
+    bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
+    if not bpoly.is_valid:
+        bpoly = bpoly.buffer(0)
+    clip_region = clip_poly if clip_poly is not None else bpoly
+
+    clipped = _clipped_rooms(rects, clip_region)
+    rooms_out, edge_segs = [], []
+    for c in clipped:
+        pt = c["poly"].representative_point()   # 항상 내부의 점
+        rooms_out.append({
+            "name": c["name"],
+            "cx": round(pt.x, 1), "cy": round(pt.y, 1),
+            "area_m2": c["area_m2"],
+        })
+        x0, y0, x1, y1 = c["grid_bbox"]   # 격자 사각형 4변 (클립 전) — 벽 선분 후보
         edge_segs.append({"a": [x0, y0], "b": [x1, y0]})
         edge_segs.append({"a": [x1, y0], "b": [x1, y1]})
         edge_segs.append({"a": [x1, y1], "b": [x0, y1]})
@@ -437,6 +690,58 @@ def _rects_to_rooms_and_walls(rects, boundary, clip_poly=None):
 
     walls = _postprocess_walls(edge_segs, boundary, clip_poly=clip_poly)
     return rooms_out, walls
+
+
+def _generate_with_retries(build_prompt, clip_region, outline_poly, boundary, clip_poly,
+                           bedrooms_req, baths_req, orientation, caller, max_tries=3):
+    """AI 호출(caller(prompt)->텍스트)을 검증·재생성으로 감싼다.
+    HARD 위반 0이면 즉시 채택, 아니면 _violations_feedback를 붙여 재요청(최대 max_tries).
+    3회 후 best=min(HARD수, SOFT수, −방수). caller 주입 가능(키 없이 단위검증).
+    반환: (room_list, walls, warnings, ok, attempts, clipped) / 유효 시도 0이면 None
+          (단, caller 예외만 있었으면 그 예외를 re-raise)."""
+    feedback, last_exc = "", None
+    attempts_log = []   # (hard, soft, nrooms, clipped, rects)
+    for i in range(max_tries):
+        prompt = build_prompt(feedback)
+        try:
+            text = caller(prompt)
+        except Exception as e:
+            last_exc = e
+            attempts_log.append((999, 999, 0, [], []))
+            feedback = "[직전 호출이 실패했다. 오직 {\"rooms\":[...]} JSON만 다시 출력하라.]"
+            print(f"[generate-layout] attempt {i+1}/{max_tries}: caller 예외 {e}")
+            continue
+        rects = _parse_rooms_json(text)
+        if not rects:
+            attempts_log.append((999, 999, 0, [], []))
+            feedback = "[직전 출력이 JSON으로 파싱되지 않았다. 산문·펜스 없이 {\"rooms\":[...]} JSON만 출력하라.]"
+            print(f"[generate-layout] attempt {i+1}/{max_tries}: 파싱 실패")
+            continue
+        clipped = _clipped_rooms(rects, clip_region)
+        V = _validate_layout(clipped, outline_poly, bedrooms_req, baths_req, orientation)
+        hard = [v for v in V if v["severity"] == "hard"]
+        soft = [v for v in V if v["severity"] == "soft"]
+        attempts_log.append((len(hard), len(soft), len(clipped), clipped, rects))
+        print(f"[generate-layout] attempt {i+1}/{max_tries}: HARD {len(hard)} · SOFT {len(soft)} · 방 {len(clipped)}")
+        for v in hard:
+            print(f"    HARD: {v['msg']}")
+        for v in soft:
+            print(f"    soft: {v['msg']}")
+        if not hard:
+            break
+        feedback = _violations_feedback(V, clipped)
+
+    valid = [a for a in attempts_log if a[2] > 0]
+    if not valid:
+        if last_exc:
+            raise last_exc
+        return None
+    best = min(valid, key=lambda a: (a[0], a[1], -a[2]))
+    hard_n, _soft_n, _n, clipped, rects = best
+    room_list, walls = _rects_to_rooms_and_walls(rects, boundary, clip_poly=clip_poly)
+    Vbest = _validate_layout(clipped, outline_poly, bedrooms_req, baths_req, orientation)
+    warnings = [v["msg"] for v in Vbest]
+    return room_list, walls, warnings, (hard_n == 0), len(attempts_log), clipped
 
 
 def _postprocess_walls(walls, boundary, clip_poly=None):
@@ -573,30 +878,42 @@ async def generate_layout(payload: dict):
         if baths is None:
             baths = d_baths
 
-    try:
+    # 방위(향): 알면 방향별 배치 강화, 모름이면 채광 유무만
+    orientation = (payload.get("building_orientation") or "").strip() or None
+
+    clip_poly = avail if fixed_polys else None
+    clip_region = avail   # 고정 없으면 avail==bpoly
+
+    def _caller(prompt_text):
         from anthropic import Anthropic
         client = Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=_LAYOUT_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
-                                                fixed_rooms=fixed_rooms, avail_bbox=avail_bbox),
-            }],
+            model="claude-sonnet-4-6", max_tokens=2048, system=_LAYOUT_SYSTEM,
+            messages=[{"role": "user", "content": prompt_text}],
         )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+
+    def _bp(feedback):
+        return _build_layout_prompt(
+            boundary, bbox, area_m2, unit, rooms, baths,
+            fixed_rooms=fixed_rooms, avail_bbox=avail_bbox,
+            building_orientation=orientation, feedback=feedback,
+        )
+
+    # 검증·재생성 루프(최대 3회): HARD 위반 0이면 채택, 아니면 피드백 재요청.
+    try:
+        result = _generate_with_retries(
+            _bp, clip_region, bpoly, boundary, clip_poly,
+            rooms, baths, orientation, _caller, max_tries=3,
+        )
     except Exception as e:
         raise HTTPException(500, f"AI 구조 생성 실패: {str(e)}")
-
-    rects = _parse_rooms_json(text)
-    if not rects:
+    if result is None:
         raise HTTPException(
             422,
-            "AI가 유효한 방을 만들지 못했습니다(파싱 실패). 기존 작업은 그대로입니다. 다시 시도해 보세요.",
+            "AI가 유효한 방을 만들지 못했습니다(파싱·생존 실패). 기존 작업은 그대로입니다. 다시 시도해 보세요.",
         )
-    room_list, walls = _rects_to_rooms_and_walls(rects, boundary, clip_poly=avail if fixed_polys else None)
+    room_list, walls, warnings, ok, attempts, _clipped = result
     if not room_list or not walls:
         raise HTTPException(
             422,
@@ -605,6 +922,7 @@ async def generate_layout(payload: dict):
     return JSONResponse({
         "walls": walls, "count": len(walls),
         "rooms": room_list, "bedrooms": rooms, "baths": baths,
+        "warnings": warnings, "ok": ok, "attempts": attempts,
     })
 
 

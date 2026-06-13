@@ -122,17 +122,22 @@ with sync_playwright() as pw:
     page.click("#btn-design-mode")
     page.wait_for_function("designBoundary && designGroup && designUnit==='A'", timeout=20000)
 
-    # ── /api/generate-layout 목: designBoundary 기반 격자 mock {walls, rooms} 반환 ──
+    # ── /api/generate-layout 목: body 캡처 + warnings/ok 포함 응답 ──
     mock = page.evaluate(MOCK_WALLS_JS)
     mock_walls = mock["walls"]; mock_rooms = mock["rooms"]
     import json
+    captured = {}
     def handle_gen(route):
+        try: captured["body"] = json.loads(route.request.post_data)
+        except Exception: captured["body"] = None
         route.fulfill(status=200, content_type="application/json",
                       body=json.dumps({"walls": mock_walls, "count": len(mock_walls),
-                                       "rooms": mock_rooms, "bedrooms": 2, "baths": 1}))
+                                       "rooms": mock_rooms, "bedrooms": 2, "baths": 1,
+                                       "warnings": ["거실 채광 부족"], "ok": False, "attempts": 3}))
     page.route("**/api/generate-layout", handle_gen)
 
-    # ── 1. 개수 입력 + AI 버튼 → 주입 ──
+    # ── 1. 방위 설정 + 개수 입력 + AI 버튼 → 주입 ──
+    page.select_option("#design-orientation-select", "남")
     page.fill("#gen-rooms", "2")
     page.fill("#gen-baths", "1")
     assert not page.evaluate("document.getElementById('btn-generate-layout').disabled"), "AI 버튼 비활성"
@@ -145,6 +150,16 @@ with sync_playwright() as pw:
     assert walls == len(mock_walls), "주입된 벽 수 불일치"
     assert inside, "주입 벽이 외곽 밖"
     assert rooms >= 2, f"닫힌 방이 안 생김(방{rooms}) — mock은 사각+가운데분할이라 ≥2여야"
+
+    # ── 1a. 요청 body에 building_orientation 실림 + warnings/ok 안전 처리 ──
+    body = captured.get("body") or {}
+    print(f"[1a body] building_orientation={body.get('building_orientation')}")
+    assert body.get("building_orientation") == "남", "body에 방위(building_orientation) 미포함"
+    # ok=False + warnings여도 주입은 됨(경고 표시 경로). 동기화된 공용 드롭다운도 확인.
+    assert page.evaluate("document.getElementById('orientation-select').value") == "남", "방위 셀렉트 동기화 안 됨"
+    statustxt = page.evaluate("(document.getElementById('status-msg')||{}).textContent || ''")
+    print(f"[1a 경고표시] status='{statustxt[:60]}'")
+    assert ("미충족" in statustxt) or ("채광" in statustxt), "경고(warnings) 상태 표시 안 됨"
 
     # ── 1b. AI 방 이름이 면에 매칭돼 라벨로 표시 ──
     named = page.evaluate("designRooms.filter(r=>r.name).map(r=>r.name)")

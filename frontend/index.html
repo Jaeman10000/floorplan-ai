@@ -534,6 +534,16 @@
         <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
         <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
           <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
+          <label style="display:block; font-size:11px; color:#bbb; margin-bottom:6px;">도면 위쪽 방위 (채광·배치 강화 — 모르면 '모름')
+            <select id="design-orientation-select"
+              style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+              <option value="모름">모름</option>
+              <option value="북">북쪽</option>
+              <option value="남">남쪽</option>
+              <option value="동">동쪽</option>
+              <option value="서">서쪽</option>
+            </select>
+          </label>
           <div style="display:flex; gap:6px;">
             <label style="flex:1; font-size:11px; color:#bbb;">방
               <input type="number" id="gen-rooms" min="1" max="8" placeholder="자동"
@@ -2333,9 +2343,13 @@ async function generateLayout() {
 
   const roomsVal = document.getElementById("gen-rooms").value.trim();
   const bathsVal = document.getElementById("gen-baths").value.trim();
+  // 방위: 설계 패널 셀렉트 우선, 없으면 AI 조언 섹션 공용 드롭다운
+  const dOri = document.getElementById("design-orientation-select");
+  const orientation = (dOri && dOri.value) || (document.getElementById("orientation-select") || {}).value || "모름";
   const body = {
     boundary_mm: designBoundary.map(p => p.slice()),
     unit: designUnit,
+    building_orientation: orientation,
     // 고정 방: AI가 침범 안 하게 백엔드가 사용가능영역에서 차감 (없으면 빈 배열 → 무영향)
     fixed_rooms: designFixedRooms.map(fr => ({ name: fr.name, poly: fr.poly.map(p => p.slice()) })),
   };
@@ -2344,12 +2358,18 @@ async function generateLayout() {
 
   const btn = document.getElementById("btn-generate-layout");
   const prevTxt = btn.textContent;
-  btn.disabled = true; btn.textContent = "🤖 생성 중…";
-  showStatus("AI 구조 초안 생성 중… (수 초 소요)", "loading");
+  btn.disabled = true;
+  // 검증·재생성으로 최대 ~40초 — 경과초 표시로 살아있음을 보이고, 90초 타임아웃
+  let elapsed = 0;
+  btn.textContent = "🤖 생성 중… 0s";
+  const tick = setInterval(() => { elapsed++; btn.textContent = `🤖 생성 중… ${elapsed}s`; }, 1000);
+  const ctrl = new AbortController();
+  const killer = setTimeout(() => ctrl.abort(), 90000);
+  showStatus("AI가 평면을 그리고 채광·규격·방위·동선을 검증·재생성합니다 — 최대 ~40초.", "loading");
   try {
     const res = await fetch(`${API}/api/generate-layout`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body) });
+      body: JSON.stringify(body), signal: ctrl.signal });
     if (!res.ok) throw new Error((await res.text()).slice(0, 200));
     const data = await res.json();
     const aiWalls = (data.walls || []).map(w => ({ a: w.a.slice(), b: w.b.slice() }));
@@ -2364,10 +2384,21 @@ async function generateLayout() {
     renderDesignWalls();
     renderDesignRooms();
     updateDesignActions();
-    showStatus(`🤖 ${UNIT_LABELS[designUnit]} AI 초안 생성 (벽 ${aiWalls.length}개 · 방 ${designRooms.length}개, 침실 ${data.bedrooms}·욕실 ${data.baths}). 클릭-클릭으로 다듬으세요. Ctrl+Z=초안 취소.`, "ok");
+    const warns = data.warnings || [];
+    const ok = data.ok !== false;
+    const base = `🤖 ${UNIT_LABELS[designUnit]} AI 초안 (벽 ${aiWalls.length}·방 ${designRooms.length}, 침실 ${data.bedrooms}·욕실 ${data.baths})`;
+    if (ok && !warns.length) {
+      showStatus(`${base} — 클릭-클릭으로 다듬으세요. Ctrl+Z=초안 취소.`, "ok");
+    } else {
+      const shown = warns.slice(0, 2).join(" / ");
+      showStatus(`⚠️ ${base} — 일부 규칙 미충족: ${shown}${warns.length > 2 ? ` 외 ${warns.length - 2}건` : ""}. 클릭-클릭으로 직접 보정하세요. Ctrl+Z=초안 취소.`, ok ? "info" : "error");
+    }
   } catch (err) {
-    showStatus("AI 구조 생성 실패: " + err.message, "error");
+    showStatus(err.name === "AbortError"
+      ? "AI 구조 생성 시간 초과(90초). 잠시 후 다시 시도하세요. 기존 작업은 그대로입니다."
+      : "AI 구조 생성 실패: " + err.message, "error");
   } finally {
+    clearInterval(tick); clearTimeout(killer);
     btn.disabled = false; btn.textContent = prevTxt;
     updateDesignActions();
   }
@@ -2453,6 +2484,15 @@ document.getElementById("btn-clear-design").addEventListener("click", clearDesig
 document.getElementById("btn-revert-design").addEventListener("click", revertDesignToOriginal);
 document.getElementById("btn-save-design").addEventListener("click", saveDesign);
 document.getElementById("btn-generate-layout").addEventListener("click", generateLayout);
+// 방위 셀렉트 양방향 동기화 (설계 패널 ↔ AI 조언 섹션): 어느 쪽을 바꿔도 일치
+(function syncOrientationSelects() {
+  const a = document.getElementById("design-orientation-select");
+  const b = document.getElementById("orientation-select");
+  if (!a || !b) return;
+  a.value = b.value;   // 초기 일치
+  a.addEventListener("change", () => { b.value = a.value; });
+  b.addEventListener("change", () => { a.value = b.value; });
+})();
 document.getElementById("btn-export-png").addEventListener("click", capture3dPng);
 document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPdf);
 // 🔒 고정 방
