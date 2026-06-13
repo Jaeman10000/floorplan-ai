@@ -657,6 +657,7 @@ let designUnit = null;         // 설계 대상 세대
 let designBoundary = null;     // 빈 외곽 ring (mm) — 백엔드 shapely union 결과
 let designWalls = [];          // JJ가 그린 벽 선분 [{a:[x,y], b:[x,y]}]
 let designRooms = [];          // 닫힌 면 = 방 [{poly, area_m2, color}]
+let designRoomNames = [];      // AI가 준 방 이름+중심 [{name, cx, cy}] — 면 중심 매칭용 (best effort)
 let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
 let designDrawing = false;     // 그리기 진행중 (첫 점 찍힘, 둘째 클릭 대기) = drawStart!=null
 let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm (null=idle)
@@ -1768,6 +1769,17 @@ function planarFaces(segments) {
   return faces;
 }
 
+// 점이 폴리곤 내부인지 (ray-casting) — AI 방 이름을 면에 매칭할 때 사용
+function pointInPoly(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if (((yi > pt[1]) !== (yj > pt[1])) &&
+        (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
 // designWalls + 외곽 → designRooms 재계산
 function recomputeDesignRooms() {
   designRooms = [];
@@ -1784,7 +1796,14 @@ function recomputeDesignRooms() {
     const ar = shoelaceArea(f);
     if (ar < _FACE_MIN_AREA) continue;                 // 너무 작은 면 제외
     if (ar > outArea * 0.97) continue;                 // 외곽 전체와 동일(=아직 안 나뉨)·외부면 제외
-    designRooms.push({ poly: f, area_m2: +(ar / 1e6).toFixed(2), color: ROOM_PALETTE[ci % ROOM_PALETTE.length] });
+    // AI 방 이름 매칭(best effort): 면 안에 들어오는 AI 중심좌표의 이름을 부여.
+    // ⚠️ JJ가 벽을 옮겨 면이 바뀌면 이름이 어긋나거나 사라질 수 있음(참고용).
+    let name = null;
+    for (const rn of designRoomNames) {
+      if (pointInPoly([rn.cx, rn.cy], f)) { name = rn.name; break; }
+    }
+    designRooms.push({ poly: f, area_m2: +(ar / 1e6).toFixed(2), name,
+                       color: ROOM_PALETTE[ci % ROOM_PALETTE.length] });
     ci++;
   }
 }
@@ -1821,7 +1840,7 @@ function renderDesignRooms() {
     tile.rotation.x = Math.PI / 2; tile.position.y = 0.02;
     designGroup.add(tile); _designRoomMeshes.push(tile);
     const c = polyCentroid(rm.poly);
-    const label = makeLabel(`${rm.area_m2}㎡`);
+    const label = makeLabel(rm.name ? `${rm.name}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`);
     label.position.set(c[0] / 1000, 0.6, c[1] / 1000);
     designGroup.add(label); _designRoomMeshes.push(label);
   }
@@ -1829,12 +1848,13 @@ function renderDesignRooms() {
 
 // ── 진입/이탈/undo ─────────────────────────────────────────────────────────
 async function enterDesignMode(unit) {
-  let boundary, loadedWalls = [];
+  let boundary, loadedWalls = [], loadedNames = [];
   const saved = unitDesigns[unit];
   if (saved) {
     // 저장된 설계 있으면 그 외곽·벽을 불러와 이어 편집 (백엔드 재요청 X — 일관성)
     boundary = saved.boundary_mm.map(p => p.slice());
     loadedWalls = saved.walls.map(w => ({ a: w.a.slice(), b: w.b.slice() }));
+    loadedNames = (saved.roomNames || []).map(r => ({ name: r.name, cx: r.cx, cy: r.cy }));
   } else {
     // 첫 진입: 빈 외곽(봉투) 백엔드 요청
     const polys = parsedData.rooms.filter(r => r.unit === unit).map(r => r.polygon_mm);
@@ -1853,6 +1873,7 @@ async function enterDesignMode(unit) {
   if (!boundary || boundary.length < 3) { showStatus("외곽을 만들 수 없습니다.", "error"); return false; }
 
   designUnit = unit; designBoundary = boundary; designWalls = loadedWalls; designRooms = []; designHistory = [];
+  designRoomNames = loadedNames;   // 저장본 이름 복원 (첫 진입은 빈 배열)
   recomputeDesignRooms();   // 불러온 벽으로 방 복원 (없으면 빈 결과)
 
   // 원본 레이어 숨김 (원본 데이터는 보존 — 나가면 복귀)
@@ -1897,7 +1918,7 @@ function exitDesignMode() {
     roomScene.remove(designGroup);
   }
   designGroup = null; _designWallMeshes = []; _designRoomMeshes = [];
-  designBoundary = null; designWalls = []; designRooms = []; designHistory = [];
+  designBoundary = null; designWalls = []; designRooms = []; designHistory = []; designRoomNames = [];
   designUnit = null; drawStart = null; designDrawing = false;
   // 원본 레이어 복귀
   roomTiles.forEach(t => t.visible = true);
@@ -1917,7 +1938,7 @@ function undoDesignWall() {
 // "그리던 것 지우기" — 현재 작업만 빈 외곽으로 (저장본·To-Be는 안 건드림)
 function clearDesignWalls() {
   if (!designWalls.length) return;
-  designHistory = []; designWalls = []; designRooms = [];
+  designHistory = []; designWalls = []; designRooms = []; designRoomNames = [];
   recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
   updateDesignActions();
   showStatus("↺ 그리던 것을 지웠습니다 (저장본은 유지).", "ok");
@@ -1927,7 +1948,7 @@ function clearDesignWalls() {
 function revertDesignToOriginal() {
   const hadSaved = !!unitDesigns[designUnit];
   delete unitDesigns[designUnit];
-  designHistory = []; designWalls = []; designRooms = [];
+  designHistory = []; designWalls = []; designRooms = []; designRoomNames = [];
   recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
   renderToBe();
   updateDesignActions();
@@ -1943,6 +1964,7 @@ function saveDesign() {
     boundary_mm: designBoundary.map(p => p.slice()),
     walls: designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })),
     rooms: designRooms.map(r => ({ poly: r.poly.map(p => p.slice()), area_m2: r.area_m2, color: r.color })),
+    roomNames: designRoomNames.map(r => ({ name: r.name, cx: r.cx, cy: r.cy })),
   };
   renderToBe();
   updateDesignActions();
@@ -2046,11 +2068,12 @@ async function generateLayout() {
     designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
     if (designHistory.length > 50) designHistory.shift();
     designWalls = aiWalls;
+    designRoomNames = (data.rooms || []).map(r => ({ name: r.name, cx: r.cx, cy: r.cy }));
     recomputeDesignRooms();
     renderDesignWalls();
     renderDesignRooms();
     updateDesignActions();
-    showStatus(`🤖 ${UNIT_LABELS[designUnit]} AI 초안 생성 (벽 ${aiWalls.length}개 · 방 ${designRooms.length}개, 요청 방 ${data.rooms}·화장실 ${data.baths}). 클릭-클릭으로 다듬으세요. Ctrl+Z=초안 취소.`, "ok");
+    showStatus(`🤖 ${UNIT_LABELS[designUnit]} AI 초안 생성 (벽 ${aiWalls.length}개 · 방 ${designRooms.length}개, 침실 ${data.bedrooms}·욕실 ${data.baths}). 클릭-클릭으로 다듬으세요. Ctrl+Z=초안 취소.`, "ok");
   } catch (err) {
     showStatus("AI 구조 생성 실패: " + err.message, "error");
   } finally {

@@ -434,6 +434,43 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         초안 통째0)·PNG 비단색72418·PDF 유효·에러0. **방 개수는 검증 안 함**(AI 산출이라). ③(JJ
         수동·필수) 실제 키로 브라우저: 방3 화장실2 입력→AI 초안→벽 외곽 안·클릭-클릭 편집·PNG/PDF·
         Ctrl+Z 초안 취소·개수 비우고 기본값 동작. **오피스텔로도 1회**(하드코딩 없음). 통과 전 미완료.
+- [x] **AI 초안 v2 — AI 출력을 "벽 선분"→"라벨 붙은 직사각형"으로 전환**(v1의 자유좌표 불안정
+      해결: 외곽 이탈·방 이름 없음·엉성한 배치). AI가 벽 대신 방을 직사각형으로 출력:
+      `{"rooms":[{"name","x","y","w","h"}]}`(mm, 100mm 격자). `_parse_rooms_json` 신규.
+      **방 프로그램 규칙(프롬프트)**: "방"=침실만. 침실 정확히 N·욕실 정확히 M(개수 변경 금지) +
+        한국 주거 기본 공용공간 **필수**(현관·거실·주방 또는 LDK·다용도실). ★**거실=동선 허브**:
+        현관·주방·욕실·모든 침실이 거실에 직접 접함(빌라 규모라 복도 없이 거실이 동선 겸함).
+        **막힌 방 금지**(다른 침실 거쳐야만 들어가는 구조 X, 거실/현관서 직접 접근). ★**방 사이
+        빈틈 금지**(인접 방은 변을 정확히 공유하며 맞붙음; 빈틈은 "방들과 불규칙 외곽선 사이"에만
+        허용)·겹침 금지·외곽 bbox 안·100mm 격자.
+      백엔드 `_rects_to_rooms_and_walls`: 각 rect 격자스냅 → **shapely 정확 intersection**(buffer
+        없이 — 외곽 밖 절대 통과 금지)·**area<1㎡ drop**·`representative_point`로 중심(L자여도 내부
+        보장) → 생존 rect의 격자 사각형 4변을 모아 기존 `_postprocess_walls`(격자스냅·buffer50 클립·
+        degenerate·dedup)로 벽 생성(**인접 공유변은 dedup으로 1개**). 반환
+        `{walls, rooms:[{name,cx,cy,area_m2}], count, bedrooms, baths}`. rooms 0개·생존 0개면 **422**
+        (designWalls 보존). ※벽은 buffer50 클립(경계 붙은 변 보존), 방면적은 buffer 없는 정확 클립.
+      프런트 **이름 매칭(best effort)**: 응답 rooms→전역 `designRoomNames[{name,cx,cy}]` 저장,
+        `recomputeDesignRooms` 끝에서 각 면에 대해 그 안에 든 AI 중심좌표의 이름을 `pointInPoly`
+        (신규 ray-casting)로 부여→`renderDesignRooms` 라벨=`이름\n면적`(이름 없으면 면적만).
+        saveDesign/enterDesignMode saved 분기에서 roomNames 유지. 상태텍스트 `data.rooms`(정수)→
+        `data.bedrooms`. walls 포맷 불변이라 클릭-클릭/undo(초안=1단위)/내보내기/renderToBe/
+        beforeunload/unit-boundary/export-plan-pdf **전부 무수정**.
+      ⚠️ **이름 매칭 한계**: JJ가 벽을 옮겨 면이 바뀌면(특히 벽이 AI 중심을 가로지르면) 이름이
+        어긋나거나 사라질 수 있음. JJ가 새로 그은 벽으로 생긴 면엔 이름 없음(면적만). = 참고용,
+        최종 이름은 방이름수정 UI가 정석(설계모드 방엔 미적용=별도 증분). AI가 빈틈 없이 채우리란
+        보장도 없음 → 틈 생기면 planarFaces가 인접 면 병합(JJ 클릭-클릭 마감). **초안이지 완성 아님.**
+      ⚠️ **ANTHROPIC_API_KEY**: backend/.env에 한 줄(UTF-8, prefix 중복 주의 — `sk-ant-sk-ant-`처럼
+        두 번 들어가면 401). `anthropic` 패키지 venv에 설치됨(0.109.1). 실제 키로 호출 확인 완료
+        (빌라 더미 10×8m: 현관·다용도실·거실·주방·욕실·침실1·침실2·LDK확장, 침실수=입력2, 전부
+        100mm 격자).
+      검증: ①(자동) `_verify_genlayout_backend.py`(직사각형판) — 격자스냅·외곽밖 통과0·<1㎡ drop·
+        침실수=입력 보존·공유변 dedup(벽21<4×6)·중심 면내부·`_parse_rooms_json`(펜스/산문/깨짐/w0)·
+        기본값·프롬프트(개수+빈틈) 전부 통과. ②(자동) `_verify_genlayout.py` — `/api/generate-layout`
+        page.route 목({walls,rooms} 새 형식)→주입·전부외곽안·**이름 라벨 매칭(거실·침실)**·클릭-클릭
+        편집(+1)·Ctrl+Z 통째취소·PNG72614·PDF유효·에러0. **배치 품질/방개수 미검증.** ③(JJ 수동·
+        필수) 빌라 page3 A세대 침실2 욕실1: 방 외곽 안·**방 사이 빈틈 없음**·현관/거실/주방/침실/
+        욕실/다용도실 라벨·**거실 통해 모든 공간 접근**·클릭-클릭 편집·Ctrl+Z 통째취소. **오피스텔로도
+        1회**. 통과 전 미완료.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 
 

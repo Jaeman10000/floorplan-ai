@@ -55,11 +55,17 @@ MOCK_WALLS_JS = """
   const mx0=g(x0+(x1-x0)*0.1), mx1=g(x1-(x1-x0)*0.1);
   const my0=g(y0+(y1-y0)*0.1), my1=g(y1-(y1-y0)*0.1);
   const cx=g((x0+x1)/2), cy=g((y0+y1)/2);
-  return [
+  const walls = [
     {a:[mx0,my0],b:[mx1,my0]}, {a:[mx1,my0],b:[mx1,my1]},
     {a:[mx1,my1],b:[mx0,my1]}, {a:[mx0,my1],b:[mx0,my0]},  // 사각 방 1개
     {a:[cx,my0],b:[cx,my1]},                                // 가운데 분할 → 방 2개
   ];
+  // 두 면(좌/우 반)의 중심에 이름 — 백엔드 rooms 응답 흉내
+  const rooms = [
+    {name:'거실', cx:g((mx0+cx)/2), cy:cy, area_m2:10.0},
+    {name:'침실', cx:g((cx+mx1)/2), cy:cy, area_m2:8.0},
+  ];
+  return { walls, rooms };
 }
 """
 INSIDE = """
@@ -116,18 +122,19 @@ with sync_playwright() as pw:
     page.click("#btn-design-mode")
     page.wait_for_function("designBoundary && designGroup && designUnit==='A'", timeout=20000)
 
-    # ── /api/generate-layout 목: designBoundary 기반 격자 mock 벽 반환 ──
-    mock_walls = page.evaluate(MOCK_WALLS_JS)
+    # ── /api/generate-layout 목: designBoundary 기반 격자 mock {walls, rooms} 반환 ──
+    mock = page.evaluate(MOCK_WALLS_JS)
+    mock_walls = mock["walls"]; mock_rooms = mock["rooms"]
     import json
     def handle_gen(route):
         route.fulfill(status=200, content_type="application/json",
                       body=json.dumps({"walls": mock_walls, "count": len(mock_walls),
-                                       "rooms": 3, "baths": 2}))
+                                       "rooms": mock_rooms, "bedrooms": 2, "baths": 1}))
     page.route("**/api/generate-layout", handle_gen)
 
     # ── 1. 개수 입력 + AI 버튼 → 주입 ──
-    page.fill("#gen-rooms", "3")
-    page.fill("#gen-baths", "2")
+    page.fill("#gen-rooms", "2")
+    page.fill("#gen-baths", "1")
     assert not page.evaluate("document.getElementById('btn-generate-layout').disabled"), "AI 버튼 비활성"
     page.click("#btn-generate-layout")
     page.wait_for_function("designWalls.length > 0", timeout=15000)
@@ -138,6 +145,14 @@ with sync_playwright() as pw:
     assert walls == len(mock_walls), "주입된 벽 수 불일치"
     assert inside, "주입 벽이 외곽 밖"
     assert rooms >= 2, f"닫힌 방이 안 생김(방{rooms}) — mock은 사각+가운데분할이라 ≥2여야"
+
+    # ── 1b. AI 방 이름이 면에 매칭돼 라벨로 표시 ──
+    named = page.evaluate("designRooms.filter(r=>r.name).map(r=>r.name)")
+    stored = page.evaluate("designRoomNames.length")
+    print(f"[1b 이름매칭] designRoomNames={stored} / 라벨붙은방={named}")
+    assert stored == len(mock_rooms), "designRoomNames에 AI 방 이름 저장 안 됨"
+    assert len(named) >= 1, "면 중심 매칭으로 이름 붙은 방이 하나도 없음"
+    assert any(n in ("거실", "침실") for n in named), "매칭된 이름이 mock 이름과 다름"
 
     # ── 2. 이어서 클릭-클릭으로 벽 1개 편집(주입 벽이 편집 가능) ──
     before = walls

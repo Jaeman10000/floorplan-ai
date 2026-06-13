@@ -267,17 +267,29 @@ def _default_room_counts(area_m2):
 
 _LAYOUT_SYSTEM = (
     "당신은 시공업자를 돕는 주거 평면 설계 보조다. 주어진 '빈 외곽'(한 세대의 벽 없는 "
-    "내부 공간) 안에 내벽을 그려 방을 나누는 '초안'을 만든다. 결과는 시공업자가 직접 "
-    "편집할 출발점이므로 완벽할 필요는 없고, 아래 제약을 반드시 지켜라.\n"
-    "[제약]\n"
-    "1. 모든 벽은 수평 또는 수직의 축정렬 직선 선분이다(대각선 금지).\n"
-    "2. 모든 좌표는 100mm 격자 위의 값(100의 배수)으로 한다.\n"
-    "3. 모든 벽은 외곽 폴리곤 '안에만' 있어야 한다(밖으로 나가지 말 것).\n"
-    "4. 벽의 끝점은 다른 벽이나 외곽선과 같은 격자점에서 만나게 해 방이 닫히도록 한다.\n"
-    "5. 요청한 '방 N개, 화장실 M개'에 맞춰 구성한다. 개수를 임의로 바꾸지 마라.\n"
-    "6. 일반 주거 상식(거실/LDK는 크게, 침실은 9~12㎡, 화장실은 4~5㎡ 정도)을 따른다.\n"
+    "내부 공간) 안에 방을 '축정렬 직사각형'으로 배치한 평면 초안을 만든다. 벽 선분이 "
+    "아니라 '방 직사각형 목록'을 출력한다. 결과는 시공업자가 직접 편집할 출발점이다.\n"
+    "[방 프로그램 — 반드시 지킴]\n"
+    "1. '방'은 침실만 의미한다. 침실을 정확히 N개, 욕실(화장실)을 정확히 M개 둔다. "
+    "개수를 임의로 바꾸지 마라.\n"
+    "2. 침실 N·욕실 M에 더해 한국 주거의 기본 공용공간을 반드시 포함한다: "
+    "현관, 거실, 주방(또는 거실과 합친 LDK), 다용도실.\n"
+    "3. 거실은 동선의 허브다. 현관·주방·욕실·모든 침실이 거실에 '직접 접하도록'(거실의 "
+    "변과 맞붙도록) 배치한다. 빌라 규모이므로 별도 복도 없이 거실이 동선 공간을 겸한다.\n"
+    "4. 막힌 방 금지: 어떤 방도 다른 침실을 거쳐야만 들어가는 구조여선 안 된다. 모든 방은 "
+    "거실 또는 현관에서 직접 들어갈 수 있어야 한다.\n"
+    "[기하 — 반드시 지킴]\n"
+    "5. 모든 방은 축정렬 직사각형이며 좌표(x,y,w,h)는 100mm 격자(100의 배수)다.\n"
+    "6. 모든 방은 외곽 bbox(가로 W × 세로 H) 안에만 둔다.\n"
+    "7. 인접한 방끼리는 변을 '정확히 공유'하며 맞붙는다(같은 좌표의 변을 공유). 방과 방 "
+    "사이에 빈틈을 두지 마라 — 닫히지 않는 빈 공간이 생기면 안 된다.\n"
+    "8. 빈틈은 '방들과 불규칙한 외곽선 사이'에만 허용된다(직사각형으로 외곽을 완벽히 채울 "
+    "수 없으므로). 방과 방 사이에는 절대 빈틈이 없어야 한다.\n"
+    "9. 방끼리 겹치지 마라(겹치면 면이 엉킨다).\n"
+    "10. 일반 주거 상식: 거실/LDK는 크게, 침실 9~12㎡, 욕실 4~5㎡, 현관/다용도실은 작게.\n"
     "[출력] 오직 JSON만. 산문·설명·마크다운 펜스 금지. 형식:\n"
-    '{"walls":[{"a":[x,y],"b":[x,y]}, ...]}  (좌표 단위 mm, 정수)'
+    '{"rooms":[{"name":"거실","x":0,"y":0,"w":4000,"h":3000}, ...]}  '
+    "(x,y=좌상단 mm, w=너비, h=높이, 모두 100의 배수 정수)"
 )
 
 
@@ -286,11 +298,13 @@ def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths):
     coords = ", ".join(f"[{int(round(x))},{int(round(y))}]" for x, y in boundary)
     return (
         f"[세대] {unit or '미지정'}\n"
-        f"[외곽 크기] 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
+        f"[외곽 bbox] 좌상단 ({int(bx0)},{int(by0)}) ~ 우하단 ({int(bx1)},{int(by1)}) "
+        f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
         f"전용면적 약 {area_m2}㎡\n"
-        f"[외곽 폴리곤 좌표(mm, 시계 또는 반시계)]\n[{coords}]\n"
-        f"[요청] 이 외곽 안을 방 {rooms}개, 화장실 {baths}개로 나누는 내벽을 그려라. "
-        f"위 제약을 지켜 JSON walls만 출력."
+        f"[외곽 폴리곤 좌표(mm)]\n[{coords}]\n"
+        f"[요청] 이 외곽 안에 침실 {rooms}개, 욕실 {baths}개 + 기본 공용공간(현관·거실·"
+        f"주방 또는 LDK·다용도실)을 직사각형으로 배치하라. 거실을 동선 허브로 모든 공간이 "
+        f"거실에 접하게 하고, 방 사이 빈틈 없이 변을 공유하라. JSON rooms만 출력."
     )
 
 
@@ -298,8 +312,8 @@ def _snap_grid(v):
     return int(round(v / _GRID_MM) * _GRID_MM)
 
 
-def _parse_walls_json(text):
-    """AI 응답 텍스트 → walls 리스트. 펜스 제거 후 parse, 실패 시 첫 {...} 재시도."""
+def _parse_rooms_json(text):
+    """AI 응답 텍스트 → rooms 리스트 [{name,x,y,w,h}]. 펜스 제거 후 parse, 실패 시 첫 {...} 재시도."""
     import json, re
     s = (text or "").strip()
     # ```json ... ``` 펜스 제거
@@ -317,15 +331,60 @@ def _parse_walls_json(text):
                 obj = None
     if not isinstance(obj, dict):
         return []
-    raw = obj.get("walls") or []
+    raw = obj.get("rooms") or []
     out = []
-    for w in raw:
+    for r in raw:
         try:
-            a, b = w["a"], w["b"]
-            out.append({"a": [float(a[0]), float(a[1])], "b": [float(b[0]), float(b[1])]})
+            x, y, w, h = float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"])
+            if w <= 0 or h <= 0:
+                continue
+            name = str(r.get("name") or "").strip() or "방"
+            out.append({"name": name, "x": x, "y": y, "w": w, "h": h})
         except Exception:
             continue
     return out
+
+
+def _rects_to_rooms_and_walls(rects, boundary):
+    """AI 직사각형 목록 → (생존 방 리스트, 벽 선분 리스트).
+    각 rect: 100mm 격자 스냅 → 외곽 폴리곤과 '정확 intersection'(외곽 밖 통과 금지) →
+    area<1㎡면 버림 → representative_point(L자여도 내부 보장)로 중심.
+    생존한 rect의 격자 사각형 4변을 모아 _postprocess_walls(스냅·buffer50 클립·degenerate·
+    dedup)로 벽 생성 — 인접 방 공유변은 dedup으로 1개가 된다."""
+    from shapely.geometry import Polygon
+    bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
+    if not bpoly.is_valid:
+        bpoly = bpoly.buffer(0)
+
+    rooms_out, edge_segs = [], []
+    for r in rects:
+        x0 = _snap_grid(r["x"]); y0 = _snap_grid(r["y"])
+        x1 = _snap_grid(r["x"] + r["w"]); y1 = _snap_grid(r["y"] + r["h"])
+        if x1 - x0 < _GRID_MM or y1 - y0 < _GRID_MM:
+            continue
+        rect = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+        try:
+            clip = rect.intersection(bpoly)   # buffer 없는 정확 클립 — 외곽 밖 절대 통과 금지
+        except Exception:
+            continue
+        if clip.is_empty or clip.area < 1e6:   # <1㎡ 버림
+            continue
+        if clip.geom_type == "MultiPolygon":
+            clip = max(clip.geoms, key=lambda g: g.area)
+        pt = clip.representative_point()       # 항상 내부의 점
+        rooms_out.append({
+            "name": r["name"],
+            "cx": round(pt.x, 1), "cy": round(pt.y, 1),
+            "area_m2": round(clip.area / 1e6, 2),
+        })
+        # 격자 사각형 4변 (클립 전) — 벽 선분 후보
+        edge_segs.append({"a": [x0, y0], "b": [x1, y0]})
+        edge_segs.append({"a": [x1, y0], "b": [x1, y1]})
+        edge_segs.append({"a": [x1, y1], "b": [x0, y1]})
+        edge_segs.append({"a": [x0, y1], "b": [x0, y0]})
+
+    walls = _postprocess_walls(edge_segs, boundary)
+    return rooms_out, walls
 
 
 def _postprocess_walls(walls, boundary):
@@ -435,13 +494,22 @@ async def generate_layout(payload: dict):
     except Exception as e:
         raise HTTPException(500, f"AI 구조 생성 실패: {str(e)}")
 
-    walls = _postprocess_walls(_parse_walls_json(text), boundary)
-    if not walls:
+    rects = _parse_rooms_json(text)
+    if not rects:
         raise HTTPException(
             422,
-            "AI가 유효한 벽을 만들지 못했습니다(파싱 실패 또는 외곽 밖). 기존 작업은 그대로입니다. 다시 시도해 보세요.",
+            "AI가 유효한 방을 만들지 못했습니다(파싱 실패). 기존 작업은 그대로입니다. 다시 시도해 보세요.",
         )
-    return JSONResponse({"walls": walls, "count": len(walls), "rooms": rooms, "baths": baths})
+    room_list, walls = _rects_to_rooms_and_walls(rects, boundary)
+    if not room_list or not walls:
+        raise HTTPException(
+            422,
+            "AI 방이 외곽을 벗어나거나 너무 작아 남은 게 없습니다. 기존 작업은 그대로입니다. 다시 시도해 보세요.",
+        )
+    return JSONResponse({
+        "walls": walls, "count": len(walls),
+        "rooms": room_list, "bedrooms": rooms, "baths": baths,
+    })
 
 
 # ─── 2단계: DXF 변환 ────────────────────────────────────────────────────────
