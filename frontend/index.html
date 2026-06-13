@@ -532,6 +532,20 @@
           <button class="du-btn eu-btn" data-unit="common">공용</button>
         </div>
         <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
+        <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
+          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
+          <div style="display:flex; gap:6px;">
+            <label style="flex:1; font-size:11px; color:#bbb;">방
+              <input type="number" id="gen-rooms" min="1" max="8" placeholder="자동"
+                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            </label>
+            <label style="flex:1; font-size:11px; color:#bbb;">화장실
+              <input type="number" id="gen-baths" min="0" max="5" placeholder="자동"
+                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            </label>
+          </div>
+          <button class="btn-secondary" id="btn-generate-layout" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🤖 AI 구조 초안 생성</button>
+        </div>
         <button class="action-btn btn-primary" id="btn-save-design" style="width:100%; margin-top:8px;" disabled>💾 이 세대 새 구조 저장 (To-Be)</button>
         <div style="display:flex; gap:6px; margin-top:8px;">
           <button class="btn-secondary" id="btn-export-png" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🖼️ 3D 이미지(PNG)</button>
@@ -1996,9 +2010,60 @@ async function exportPlanPdf() {
   }
 }
 
+// ── AI 구조 초안 생성 ───────────────────────────────────────────────────────
+// 빈 외곽 + (JJ 입력) 방/화장실 개수 → 백엔드가 AI로 격자·직사각형 내벽 초안 생성.
+// 결과를 designWalls에 주입(기존 벽 있으면 confirm 후 대체). AI 초안=undo 1단위.
+async function generateLayout() {
+  if (!designMode || !designUnit) { showStatus("설계 모드에서 세대를 선택하세요.", "error"); return; }
+  if (!designBoundary || designBoundary.length < 3) { showStatus("외곽이 없습니다.", "error"); return; }
+
+  if (designWalls.length) {
+    if (!confirm("기존에 그린 벽이 사라지고 AI 초안으로 대체됩니다. 계속할까요? (Ctrl+Z로 되돌릴 수 있음)")) return;
+  }
+
+  const roomsVal = document.getElementById("gen-rooms").value.trim();
+  const bathsVal = document.getElementById("gen-baths").value.trim();
+  const body = {
+    boundary_mm: designBoundary.map(p => p.slice()),
+    unit: designUnit,
+  };
+  if (roomsVal !== "") body.rooms = parseInt(roomsVal, 10);
+  if (bathsVal !== "") body.baths = parseInt(bathsVal, 10);
+
+  const btn = document.getElementById("btn-generate-layout");
+  const prevTxt = btn.textContent;
+  btn.disabled = true; btn.textContent = "🤖 생성 중…";
+  showStatus("AI 구조 초안 생성 중… (수 초 소요)", "loading");
+  try {
+    const res = await fetch(`${API}/api/generate-layout`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    const data = await res.json();
+    const aiWalls = (data.walls || []).map(w => ({ a: w.a.slice(), b: w.b.slice() }));
+    if (!aiWalls.length) { showStatus("AI가 유효한 벽을 만들지 못했습니다. 기존 작업은 그대로입니다.", "error"); return; }
+    // AI 초안 = undo 1단위: 직전 상태를 깊은복사로 push 후 통째 대체
+    designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+    if (designHistory.length > 50) designHistory.shift();
+    designWalls = aiWalls;
+    recomputeDesignRooms();
+    renderDesignWalls();
+    renderDesignRooms();
+    updateDesignActions();
+    showStatus(`🤖 ${UNIT_LABELS[designUnit]} AI 초안 생성 (벽 ${aiWalls.length}개 · 방 ${designRooms.length}개, 요청 방 ${data.rooms}·화장실 ${data.baths}). 클릭-클릭으로 다듬으세요. Ctrl+Z=초안 취소.`, "ok");
+  } catch (err) {
+    showStatus("AI 구조 생성 실패: " + err.message, "error");
+  } finally {
+    btn.disabled = false; btn.textContent = prevTxt;
+    updateDesignActions();
+  }
+}
+
 function updateDesignActions() {
   const wrap = document.getElementById("design-actions");
   if (wrap) wrap.style.display = designMode ? "flex" : "none";
+  const gl = document.getElementById("btn-generate-layout");
+  if (gl) gl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const u = document.getElementById("btn-undo-design");
   const cl = document.getElementById("btn-clear-design");
   const rv = document.getElementById("btn-revert-design");
@@ -2072,6 +2137,7 @@ document.getElementById("btn-undo-design").addEventListener("click", undoDesignW
 document.getElementById("btn-clear-design").addEventListener("click", clearDesignWalls);
 document.getElementById("btn-revert-design").addEventListener("click", revertDesignToOriginal);
 document.getElementById("btn-save-design").addEventListener("click", saveDesign);
+document.getElementById("btn-generate-layout").addEventListener("click", generateLayout);
 document.getElementById("btn-export-png").addEventListener("click", capture3dPng);
 document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPdf);
 // Ctrl+Z (설계 모드)

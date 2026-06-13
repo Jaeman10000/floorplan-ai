@@ -403,8 +403,37 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
       ⚠️ 과거 `_verify_design.py`·`_verify_design_v11.py`는 드래그(mouse.down→move→up) 기반이라
         **stale**(클릭-클릭에선 >5px 드래그=무시되어 깨짐). 삭제 안 하고 보존만. 신규 검증은
         `_verify_clickdraw.py`/`_verify_export.py` 사용.
-- [ ] 세대별 AI 구조 제안 (다음 증분): 빈 외곽+세대 방그룹 보고 AI가 방 배치 초안 생성→
-      JJ가 같은 그리기 도구로 편집(정밀좌표 약하니 초안만). 그 결과도 PNG/PDF로 내보내기 재사용.
+- [x] **AI 구조 초안 생성 — 빈 외곽 + (JJ 입력) 방/화장실 개수 → 격자·직사각형 내벽 초안**.
+      백엔드 `POST /api/generate-layout`(boundary_mm, unit, rooms, baths): ai-advice의 Anthropic
+      호출 패턴 재사용(claude-sonnet-4-6, max_tokens 2048). 시스템프롬프트 제약 — ①벽은 수평/수직
+      축정렬 직선 ②좌표 100mm 격자 ③외곽 안에만 ④끝점 같은 격자점에서 만남 ⑤요청 개수 준수(임의
+      변경 금지) ⑥JSON `{"walls":[{"a":[x,y],"b":[x,y]}]}`만(산문 금지).
+      ★**방/화장실 개수는 AI가 정하지 않고 JJ가 입력** — 비우면 백엔드 `_default_room_counts`가
+        전용면적 기반 기본값(~50㎡↓ 방2, 60~85㎡ 방3, 그 이상 방4 / 방3↑이면 화장실2). 프런트
+        gen-rooms·gen-baths 숫자입력(placeholder="자동"), 빈칸이면 미전송→백엔드 기본값.
+      후처리(결정적 안전망, AI 정밀좌표 약점 흡수): `_parse_walls_json`(펜스 제거+parse, 실패 시
+        첫 `{...}` 재시도, 깨지면 [])→100mm 격자 스냅→degenerate(<100mm) 제거→dedup(방향무관)→
+        **shapely로 외곽 buffer(50) 클립**(LineString∩Polygon, MultiLineString 조각화, 밖 구간
+        잘라냄, <100mm 조각 버림)→재dedup. **walls 0개·파싱실패면 422**(designWalls 덮어쓰지
+        않음, 기존 작업 보존).
+      프런트 `generateLayout()`: 기존 designWalls 있으면 confirm 후 designHistory에 깊은복사 push→
+        designWalls=aiWalls(통째 대체)→recompute/render/updateDesignActions. **AI 초안=undo 1단위**
+        (Ctrl+Z 한 번에 초안 통째 취소). 로딩(버튼 disabled+"생성 중…"). 버튼은 design-unit-picker
+        안(개수입력 2칸 + 🤖 버튼), designBoundary 있을 때 활성.
+      ⚠️ **"끝점 공유 자동 충족" 가정 안 함**: 외곽은 격자가 아니라(래스터추적 43정점) 둘레 방은
+        안 닫힐 수 있음 — **정상, JJ가 끝점을 외곽에 클릭-클릭으로 붙여 마감**. 격자스냅·클립은
+        안전망일 뿐 완성 아님. AI는 초안 도구이고 결과는 JJ가 수동 보정·확정하는 구조(로드맵 3단계
+        반자동 원칙 그대로). 기존 클릭-클릭/스냅/undo/renderToBe/내보내기/beforeunload 무수정.
+      ⚠️ **ANTHROPIC_API_KEY 필요**(ai-advice와 동일). 현재 머신엔 키 미설정(backend/.env 없음)→
+        실제 호출은 500. JJ가 키 설정해야 실제 AI 초안 동작. 자동검증은 키 없이 가능하게 분리.
+      검증: ①(자동) `_verify_genlayout_backend.py` — 후처리(격자스냅 3017→3000·degenerate0·외곽밖
+        클립0·일부밖 안쪽만·dedup)·파싱(펜스/산문/깨짐)·기본값(40→방2화1·70→방3화2·120→방4화2)·
+        프롬프트 개수명시 전부 통과. ②(자동) `_verify_genlayout.py`(빌라 page3 A세대) — 키 없어
+        `/api/generate-layout`을 page.route로 **목**(외곽 bbox 안 격자 mock 벽)해 **프런트 경로**만
+        검증: 개수입력→AI버튼→주입(벽5·전부외곽안)·이어 클릭-클릭 편집(+1)·Ctrl+Z 2회(마지막 벽→
+        초안 통째0)·PNG 비단색72418·PDF 유효·에러0. **방 개수는 검증 안 함**(AI 산출이라). ③(JJ
+        수동·필수) 실제 키로 브라우저: 방3 화장실2 입력→AI 초안→벽 외곽 안·클릭-클릭 편집·PNG/PDF·
+        Ctrl+Z 초안 취소·개수 비우고 기본값 동작. **오피스텔로도 1회**(하드코딩 없음). 통과 전 미완료.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 
 

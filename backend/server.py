@@ -246,6 +246,204 @@ async def unit_boundary(payload: dict):
     return JSONResponse({"boundary_mm": ring, "area_m2": round(closed.area / 1e6, 2)})
 
 
+# ─── AI 구조 초안 생성 (내부 설계 모드) ─────────────────────────────────────
+
+_GRID_MM = 100  # 벽 좌표 스냅 격자
+
+
+def _default_room_counts(area_m2):
+    """세대 전용면적(㎡) 기반 방/화장실 기본값 — JJ가 개수를 비웠을 때만 사용.
+    통상 주거 기준: ~50㎡↓ 방2, 60~85㎡ 방3, 그 이상 방3~4 / 방3↑이면 화장실2."""
+    a = area_m2 or 0
+    if a < 50:
+        rooms = 2
+    elif a <= 85:
+        rooms = 3
+    else:
+        rooms = 4
+    baths = 2 if rooms >= 3 else 1
+    return rooms, baths
+
+
+_LAYOUT_SYSTEM = (
+    "당신은 시공업자를 돕는 주거 평면 설계 보조다. 주어진 '빈 외곽'(한 세대의 벽 없는 "
+    "내부 공간) 안에 내벽을 그려 방을 나누는 '초안'을 만든다. 결과는 시공업자가 직접 "
+    "편집할 출발점이므로 완벽할 필요는 없고, 아래 제약을 반드시 지켜라.\n"
+    "[제약]\n"
+    "1. 모든 벽은 수평 또는 수직의 축정렬 직선 선분이다(대각선 금지).\n"
+    "2. 모든 좌표는 100mm 격자 위의 값(100의 배수)으로 한다.\n"
+    "3. 모든 벽은 외곽 폴리곤 '안에만' 있어야 한다(밖으로 나가지 말 것).\n"
+    "4. 벽의 끝점은 다른 벽이나 외곽선과 같은 격자점에서 만나게 해 방이 닫히도록 한다.\n"
+    "5. 요청한 '방 N개, 화장실 M개'에 맞춰 구성한다. 개수를 임의로 바꾸지 마라.\n"
+    "6. 일반 주거 상식(거실/LDK는 크게, 침실은 9~12㎡, 화장실은 4~5㎡ 정도)을 따른다.\n"
+    "[출력] 오직 JSON만. 산문·설명·마크다운 펜스 금지. 형식:\n"
+    '{"walls":[{"a":[x,y],"b":[x,y]}, ...]}  (좌표 단위 mm, 정수)'
+)
+
+
+def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths):
+    bx0, by0, bx1, by1 = bbox
+    coords = ", ".join(f"[{int(round(x))},{int(round(y))}]" for x, y in boundary)
+    return (
+        f"[세대] {unit or '미지정'}\n"
+        f"[외곽 크기] 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
+        f"전용면적 약 {area_m2}㎡\n"
+        f"[외곽 폴리곤 좌표(mm, 시계 또는 반시계)]\n[{coords}]\n"
+        f"[요청] 이 외곽 안을 방 {rooms}개, 화장실 {baths}개로 나누는 내벽을 그려라. "
+        f"위 제약을 지켜 JSON walls만 출력."
+    )
+
+
+def _snap_grid(v):
+    return int(round(v / _GRID_MM) * _GRID_MM)
+
+
+def _parse_walls_json(text):
+    """AI 응답 텍스트 → walls 리스트. 펜스 제거 후 parse, 실패 시 첫 {...} 재시도."""
+    import json, re
+    s = (text or "").strip()
+    # ```json ... ``` 펜스 제거
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s).strip()
+    obj = None
+    try:
+        obj = json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except Exception:
+                obj = None
+    if not isinstance(obj, dict):
+        return []
+    raw = obj.get("walls") or []
+    out = []
+    for w in raw:
+        try:
+            a, b = w["a"], w["b"]
+            out.append({"a": [float(a[0]), float(a[1])], "b": [float(b[0]), float(b[1])]})
+        except Exception:
+            continue
+    return out
+
+
+def _postprocess_walls(walls, boundary):
+    """100mm 격자 스냅 → degenerate 제거 → dedup → 외곽 buffer(50) 클립.
+    클립 결과 MultiLineString은 조각화, 100mm 미만 조각은 버림."""
+    from shapely.geometry import Polygon, LineString
+    bpoly = Polygon([(float(x), float(y)) for x, y in boundary]).buffer(50)
+
+    snapped = []
+    for w in walls:
+        a = [_snap_grid(w["a"][0]), _snap_grid(w["a"][1])]
+        b = [_snap_grid(w["b"][0]), _snap_grid(w["b"][1])]
+        if (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 < _GRID_MM ** 2:  # <100mm degenerate
+            continue
+        snapped.append((a, b))
+
+    # dedup (방향 무관)
+    seen, uniq = set(), []
+    for a, b in snapped:
+        key = tuple(sorted([tuple(a), tuple(b)]))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((a, b))
+
+    # 외곽 클립
+    clipped = []
+    for a, b in uniq:
+        try:
+            inter = LineString([tuple(a), tuple(b)]).intersection(bpoly)
+        except Exception:
+            continue
+        if inter.is_empty:
+            continue
+        geoms = list(inter.geoms) if inter.geom_type == "MultiLineString" else [inter]
+        for g in geoms:
+            if g.geom_type != "LineString":
+                continue
+            cs = list(g.coords)
+            for i in range(len(cs) - 1):
+                pa = [_snap_grid(cs[i][0]), _snap_grid(cs[i][1])]
+                pb = [_snap_grid(cs[i + 1][0]), _snap_grid(cs[i + 1][1])]
+                if (pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 < _GRID_MM ** 2:
+                    continue
+                clipped.append({"a": pa, "b": pb})
+
+    # 클립 후 다시 dedup
+    seen2, final = set(), []
+    for w in clipped:
+        key = tuple(sorted([tuple(w["a"]), tuple(w["b"])]))
+        if key in seen2:
+            continue
+        seen2.add(key)
+        final.append(w)
+    return final
+
+
+@app.post("/api/generate-layout")
+async def generate_layout(payload: dict):
+    """빈 외곽 + (JJ 입력) 방/화장실 개수 → AI가 격자·직사각형 제약으로 내벽 초안 생성.
+    AI는 정밀좌표가 약하므로 '초안만' — 격자 스냅 + 외곽 클립이 안전망, 마감은 JJ가 편집."""
+    boundary = payload.get("boundary_mm") or []
+    if len(boundary) < 3:
+        raise HTTPException(400, "boundary_mm 좌표가 3개 미만입니다.")
+    unit = (payload.get("unit") or "").strip() or None
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY가 설정되지 않았습니다 (backend/.env 확인).")
+
+    # bbox·면적
+    xs = [float(p[0]) for p in boundary]
+    ys = [float(p[1]) for p in boundary]
+    bbox = (min(xs), min(ys), max(xs), max(ys))
+    from shapely.geometry import Polygon
+    area_m2 = round(Polygon([(float(x), float(y)) for x, y in boundary]).area / 1e6, 1)
+
+    # 방/화장실 개수: JJ 입력 우선, 없으면 면적 기반 기본값
+    def _as_int(v):
+        try:
+            n = int(v)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+    rooms = _as_int(payload.get("rooms"))
+    baths = _as_int(payload.get("baths"))
+    if rooms is None or baths is None:
+        d_rooms, d_baths = _default_room_counts(area_m2)
+        if rooms is None:
+            rooms = d_rooms
+        if baths is None:
+            baths = d_baths
+
+    try:
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=_LAYOUT_SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths),
+            }],
+        )
+        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    except Exception as e:
+        raise HTTPException(500, f"AI 구조 생성 실패: {str(e)}")
+
+    walls = _postprocess_walls(_parse_walls_json(text), boundary)
+    if not walls:
+        raise HTTPException(
+            422,
+            "AI가 유효한 벽을 만들지 못했습니다(파싱 실패 또는 외곽 밖). 기존 작업은 그대로입니다. 다시 시도해 보세요.",
+        )
+    return JSONResponse({"walls": walls, "count": len(walls), "rooms": rooms, "baths": baths})
+
+
 # ─── 2단계: DXF 변환 ────────────────────────────────────────────────────────
 
 @app.post("/api/convert-dxf")
