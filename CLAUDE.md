@@ -332,7 +332,36 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
       초기화·종료복원 전부 통과, 에러0.
       ⚠️ v1 범위=그리기 도구까지. 그린 결과를 parsedData/백엔드 반영(적용 버튼)은 다음 증분
       (지금은 종료 시 원본 복귀). 클릭-클릭 점찍기는 v1.1.
-- [ ] 내부 설계 v1.1: 그린 방을 parsedData에 반영(적용/저장)·방 이름 붙이기·클릭-클릭 그리기
+- [x] **내부 설계 v1.1 — 저장 & 이어 편집 + 벽 이동(editMode) 전면 삭제**.
+      ①저장: 설계 모드 "💾 저장" → designWalls+방을 전역 `unitDesigns[세대]`(parsedData와
+        분리, 재파싱 때만 리셋)에 보관. 종료해도 유지.
+      ②To-Be 패널 렌더(renderToBe): unitDesigns의 모든 세대를 한 씬에 자기 mm좌표로 그림
+        (A자리·B자리 그대로=위치가 곧 합쳐짐). 빈바닥+외곽벽+그린벽(수직면)+방타일+면적/
+        세대 라벨. 카메라=전 저장 외곽 합집합 bbox. 원본 As-Is는 종료 시 복원(가시성 토글,
+        parsedData 불변).
+      ③재진입 로드(enterDesignMode 분기): `unitDesigns[u]` 있으면 그 외곽·벽 깊은복사로
+        불러와 recompute→이어 그림(백엔드 재요청 X). 없으면 빈 외곽 fetch.
+      ④두 초기화: "그리던 것 지우기"(clearDesignWalls)=현재 작업만 빈 외곽, 저장본·To-Be
+        불변 / "이 세대 원본으로"(revertDesignToOriginal)=`delete unitDesigns[u]`+작업 비움
+        +renderToBe(이 세대 제거).
+      ⑤beforeunload: unitDesigns 비어있지 않거나 그리던 중이면 새로고침/이탈 경고(작업 보호).
+      ⑥★벽 이동(editMode) 전면 삭제: HTML 섹션·CSS(#btn-edit-mode/#edit-info)·JS
+        (setEditMode/buildWallModel/pairWalls/clusterCoord/createWallPickers/selectWall/
+        applyWallDelta/setTileGeometry/setRingGeometry/rebuildWallExtrude/refreshLabel/
+        showEditAreas/commitWallMove/snapshotRooms/restoreSnapshot/undoWallMove/resetAllEdits/
+        updateEditActions/resetEditUI/buildEditUnitButtons/selectEditUnit/rayHits + 벽드래그
+        핸들러 + editMode 전역/상수) 제거. ⚠️**공유 함수는 보존**: groundPoint/shoelaceArea/
+        makeLabel/polyCentroid/_groundPlane/roomRenderer/roomRings/wallExtrudeMesh/selectRoom/
+        applyRoomBaseColor + orbit 가드 `designDrawing`. `.eu-btn`/`.edit-hint` CSS는 설계
+        모드가 재사용하므로 유지.
+      검증(_verify_design_v11.py, 빌라 A·B세대, **실제 마우스 드래그**): editMode 흔적0+공유함수
+        보존·A 그려저장(To-Be 메시52)·B 저장(키[A,B]·메시65)·종료(As-Is복원+To-Be유지)·
+        재진입 A저장본 로드(벽1방2)→이어그려 재저장(벽2)·"그리던것지우기"(작업0·저장본2 유지)·
+        "원본으로"(unitDesigns.A 삭제·키[B])·에러0.
+      ⚠️ 한계: unitDesigns는 페이지 메모리뿐(새로고침 시 소멸—beforeunload로 경고). 영속화
+        (백엔드/localStorage)는 다음 증분. 편집은 As-Is, 결과는 To-Be(그리기를 To-Be로 옮기진
+        않음). 클릭-클릭 점찍기 미구현.
+- [ ] 내부 설계 v1.2: unitDesigns 영속화(백엔드/localStorage)·방 이름 붙이기·클릭-클릭 그리기
 - [ ] 내부 설계 2단계(AI): 빈 외곽 보고 AI가 방 배치 초안 생성→JJ가 같은 도구로 편집
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅, 벽 두께 입히기(외벽>내벽)
 
