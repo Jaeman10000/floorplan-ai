@@ -275,6 +275,59 @@
       pointer-events: none;
     }
 
+    /* AI 배치 조언 */
+    #advice-input {
+      width: 100%;
+      background: #1a1a22;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #ddd;
+      font-size: 12px;
+      font-family: inherit;
+      line-height: 1.5;
+      outline: none;
+      resize: vertical;
+      min-height: 56px;
+    }
+    #advice-input:focus { border-color: #7c3aed; }
+    #advice-input::placeholder { color: #444; }
+    #advice-input:disabled { opacity: 0.4; }
+    .advice-examples {
+      display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px;
+    }
+    .advice-chip {
+      font-size: 10px; color: #9b8ad0;
+      background: #1e1a2a; border: 1px solid #2e2640;
+      border-radius: 12px; padding: 4px 9px; cursor: pointer;
+      transition: all 0.15s;
+    }
+    .advice-chip:hover { background: #261f38; border-color: #7c3aed; color: #c4b5fd; }
+    #btn-advice {
+      width: 100%; margin-top: 8px; padding: 10px;
+      background: #7c3aed; color: #fff; border: none;
+      border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #btn-advice:disabled { opacity: 0.35; cursor: not-allowed; }
+    #btn-advice:not(:disabled):hover { background: #8b5cf6; }
+    #advice-response {
+      display: none;
+      margin-top: 10px;
+      background: #15131d;
+      border: 1px solid #2e2640;
+      border-left: 3px solid #7c3aed;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.65;
+      color: #d8d2e8;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+    #advice-response .advice-loading { color: #c4b5fd; }
+
     /* 방 이름 수정 패널 */
     #room-edit-section {
       background: #1a1a22;
@@ -376,6 +429,18 @@
           📄 DXF 다운로드
         </button>
       </div>
+    </div>
+
+    <div>
+      <div class="section-label">🧠 AI 배치 조언</div>
+      <textarea id="advice-input" placeholder="예: 안방을 남향으로 옮기면 어때? / 화장실 위치가 동선상 비효율적인데 어디가 나을까?" disabled></textarea>
+      <div class="advice-examples">
+        <span class="advice-chip">안방을 남향으로 옮기면 어때?</span>
+        <span class="advice-chip">화장실 위치가 동선상 비효율적인데 어디가 나을까?</span>
+        <span class="advice-chip">주방과 거실 배치를 개선하려면?</span>
+      </div>
+      <button id="btn-advice" disabled>💬 AI에게 조언 요청</button>
+      <div id="advice-response"></div>
     </div>
 
     <div>
@@ -595,6 +660,9 @@ async function parsePdf() {
 
     ["btn-asis","btn-redesign","btn-dxf"].forEach(id =>
       document.getElementById(id).disabled = false);
+
+    document.getElementById("advice-input").disabled = false;
+    document.getElementById("btn-advice").disabled = false;
 
     renderParsed("panel-asis", "ph-asis", data, "asis");
     showStatus(`✅ 파싱 완료 — 방 ${data.rooms.length}개(이름 ${named}), 외곽 ${data.outline_area_m2}m² · 벽 표현 ${data.wall_repr}`, "ok");
@@ -1174,6 +1242,59 @@ document.getElementById("room-name-input").addEventListener("keydown", e => {
   if (e.key === "Enter") applyRoomName();
 });
 document.getElementById("btn-cancel-room-edit").addEventListener("click", () => selectRoom(null));
+
+// ── AI 배치 조언 ──────────────────────────────────────────────────────────
+document.querySelectorAll(".advice-chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    document.getElementById("advice-input").value = chip.textContent;
+    document.getElementById("advice-input").focus();
+  });
+});
+
+async function requestAdvice() {
+  if (!parsedData) { showStatus("먼저 PDF를 업로드/파싱하세요.", "error"); return; }
+  const question = document.getElementById("advice-input").value.trim();
+  if (!question) { showStatus("질문을 입력하세요.", "error"); return; }
+
+  const btn = document.getElementById("btn-advice");
+  const box = document.getElementById("advice-response");
+  btn.disabled = true;
+  box.style.display = "block";
+  box.innerHTML = '<span class="advice-loading">🤔 도면 배치를 분석해 조언을 작성 중...</span>';
+
+  // 컨텍스트용으로 방 데이터(이름·면적·위치) + 외곽 전송
+  const rooms = parsedData.rooms.map(r => ({
+    id: r.id, names: r.names || [], area_m2: r.area_m2, polygon_mm: r.polygon_mm,
+  }));
+
+  try {
+    const res = await fetch(`${API}/api/ai-advice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        rooms,
+        building_outline_mm: parsedData.building_outline_mm,
+        outline_area_m2: parsedData.outline_area_m2,
+      }),
+    });
+    if (!res.ok) { throw new Error((await res.text()).slice(0, 300)); }
+    const data = await res.json();
+    box.textContent = data.answer || "(응답 없음)";
+    showStatus("✅ AI 배치 조언을 받았습니다.", "ok");
+  } catch (err) {
+    box.innerHTML = "";
+    box.style.display = "none";
+    showStatus("❌ AI 조언 실패: " + err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-advice").addEventListener("click", requestAdvice);
+document.getElementById("advice-input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); requestAdvice(); }
+});
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────
 function showStatus(msg, type) {

@@ -11,6 +11,7 @@ pytesseract>=0.3.10
 ezdxf>=1.1
 httpx>=0.25.0
 python-dotenv>=1.0
+anthropic>=0.40        # Claude API — AI 배치 조언 (/api/ai-advice)
 
 # Step 1: 딥러닝 벽 감지 (선택 설치 — 없어도 OpenCV fallback 동작)
 torch>=2.0.0
