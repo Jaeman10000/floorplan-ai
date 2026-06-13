@@ -533,6 +533,10 @@
         </div>
         <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
         <button class="action-btn btn-primary" id="btn-save-design" style="width:100%; margin-top:8px;" disabled>💾 이 세대 새 구조 저장 (To-Be)</button>
+        <div style="display:flex; gap:6px; margin-top:8px;">
+          <button class="btn-secondary" id="btn-export-png" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🖼️ 3D 이미지(PNG)</button>
+          <button class="btn-secondary" id="btn-export-pdf" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>📄 2D 평면도(PDF)</button>
+        </div>
       </div>
       <div id="design-actions" style="display:none; flex-direction:column; gap:6px; margin-top:8px;">
         <button class="btn-secondary" id="btn-undo-design" style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>↩️ 되돌리기 (Ctrl+Z)</button>
@@ -969,7 +973,8 @@ function renderParsed(panelId, phId, data, key) {
   document.getElementById("room-edit-section").style.display = "none";
 
   const W = panel.clientWidth, H = panel.clientHeight;
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  // preserveDrawingBuffer: 설계 모드 3D PNG 캡처(toDataURL)가 빈 이미지로 나오지 않게 함
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
   renderer.setSize(W, H);
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.domElement.className = "three-canvas";
@@ -1892,6 +1897,67 @@ function saveDesign() {
   showStatus(`💾 ${UNIT_LABELS[designUnit]} 새 구조 저장됨 (방 ${designRooms.length}개) — 우측 To-Be에 표시.`, "ok");
 }
 
+// ── 내보내기: 현재 세대 3D PNG / 2D 평면도 PDF ──────────────────────────────
+function _exportStamp() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+}
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// 현재 세대 라이브 3D(roomScene+designGroup)를 PNG로 캡처.
+// preserveDrawingBuffer가 켜져 있지만, 같은 턴에서 render→toDataURL 해 확실히 채운다.
+function capture3dPng() {
+  if (!designMode || !designUnit) { showStatus("설계 모드에서 세대를 선택하세요.", "error"); return; }
+  if (!roomRenderer || !roomScene || !roomCamera) { showStatus("3D 뷰가 준비되지 않았습니다.", "error"); return; }
+  if (!designWalls.length) { showStatus("그린 벽이 없습니다. 먼저 벽을 그어 방을 만드세요.", "error"); return; }
+  try {
+    roomRenderer.render(roomScene, roomCamera);
+    const dataUrl = roomRenderer.domElement.toDataURL("image/png");
+    if (!dataUrl || dataUrl.length < 5000) { showStatus("캡처 이미지가 비어 있습니다(렌더 대기 후 재시도).", "error"); return; }
+    const bin = atob(dataUrl.split(",")[1]);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    _downloadBlob(new Blob([arr], { type: "image/png" }), `${designUnit}_${_exportStamp()}.png`);
+    showStatus(`🖼️ ${UNIT_LABELS[designUnit]} 3D 이미지를 내려받았습니다.`, "ok");
+  } catch (err) {
+    showStatus("3D 캡처 실패: " + err.message, "error");
+  }
+}
+
+// 현재 세대 외곽+내벽+방을 백엔드로 보내 2D 평면도 PDF를 받아 다운로드.
+async function exportPlanPdf() {
+  if (!designMode || !designUnit) { showStatus("설계 모드에서 세대를 선택하세요.", "error"); return; }
+  if (!designBoundary || designBoundary.length < 3) { showStatus("외곽이 없습니다.", "error"); return; }
+  if (!designWalls.length) { showStatus("그린 벽이 없습니다. 먼저 벽을 그어 방을 만드세요.", "error"); return; }
+  const stamp = _exportStamp();
+  const filename = `${designUnit}_${stamp}.pdf`;
+  const body = {
+    unit: designUnit,
+    boundary_mm: designBoundary.map(p => p.slice()),
+    walls: designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })),
+    rooms: designRooms.map(r => ({ poly: r.poly.map(p => p.slice()), area_m2: r.area_m2 })),
+    when: new Date().toLocaleString("ko-KR"),
+    filename,
+  };
+  showStatus("2D 평면도 PDF 생성 중...", "loading");
+  try {
+    const res = await fetch(`${API}/api/export-plan-pdf`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    _downloadBlob(await res.blob(), filename);
+    showStatus(`📄 ${UNIT_LABELS[designUnit]} 2D 평면도를 내려받았습니다.`, "ok");
+  } catch (err) {
+    showStatus("PDF 생성 실패: " + err.message, "error");
+  }
+}
+
 function updateDesignActions() {
   const wrap = document.getElementById("design-actions");
   if (wrap) wrap.style.display = designMode ? "flex" : "none";
@@ -1903,6 +1969,11 @@ function updateDesignActions() {
   if (cl) cl.disabled = !designWalls.length;
   if (rv) rv.disabled = !(unitDesigns[designUnit] || designWalls.length);
   if (sv) sv.disabled = !designWalls.length;
+  // 내보내기: 그린 내벽이 있을 때만 (빈 외곽만 내보내는 건 의미 없음)
+  const ep = document.getElementById("btn-export-png");
+  const ed = document.getElementById("btn-export-pdf");
+  if (ep) ep.disabled = !designWalls.length;
+  if (ed) ed.disabled = !designWalls.length;
   const info = document.getElementById("design-info");
   if (info) {
     const savedMark = unitDesigns[designUnit] ? " · 저장됨 ✓" : "";
@@ -1963,6 +2034,8 @@ document.getElementById("btn-undo-design").addEventListener("click", undoDesignW
 document.getElementById("btn-clear-design").addEventListener("click", clearDesignWalls);
 document.getElementById("btn-revert-design").addEventListener("click", revertDesignToOriginal);
 document.getElementById("btn-save-design").addEventListener("click", saveDesign);
+document.getElementById("btn-export-png").addEventListener("click", capture3dPng);
+document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPdf);
 // Ctrl+Z (설계 모드)
 window.addEventListener("keydown", e => {
   if (designMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {

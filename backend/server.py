@@ -372,6 +372,204 @@ async def build_redesign(payload: dict):
                          "script": script, "rooms_count": len(rooms)})
 
 
+# ─── 설계 결과 내보내기: 2D 평면도 PDF (reportlab) ──────────────────────────
+
+_UNIT_LABELS = {"A": "A세대", "B": "B세대", "C": "C세대", "common": "공용"}
+_KR_FONT = "HYSMyeongJo-Medium"   # reportlab 내장 한국어 CID 폰트 (폰트 파일 동봉 불필요)
+_kr_font_ready = False
+
+
+def _ensure_kr_font():
+    """한국어 CID 폰트를 1회만 등록."""
+    global _kr_font_ready
+    if _kr_font_ready:
+        return
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    pdfmetrics.registerFont(UnicodeCIDFont(_KR_FONT))
+    _kr_font_ready = True
+
+
+def _build_plan_pdf(unit, boundary, walls, rooms, when=""):
+    """현재 세대 설계를 위에서 내려다본 2D 평면도 PDF 바이트로 생성.
+
+    좌표는 전부 mm. A4 세로에 외곽 bbox를 여백 안에 맞춰 그리고,
+    PDF 좌하단 원점에 맞춰 도면 Y(아래로 증가)를 뒤집는다(도면 상단=PDF 위).
+    - 외곽선(굵게) + 그린 내벽(중간) + 방 면적 라벨(m²)
+    - 전체 외곽 바운딩 치수(가로×세로)만 표기 (변별 치수는 노이즈라 생략)
+    - 그린 내벽 각 선분 길이 라벨 (스냅된 깨끗한 선 = 시공 치수)
+    - 스케일바 + SCALE 근사값 (배율은 fit에서 역산, 하드코딩 없음)
+    """
+    import io, math
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+
+    _ensure_kr_font()
+    PAGE_W, PAGE_H = A4                      # 595.28 x 841.89 pt
+    MARGIN = 42.0
+    TOP_RESERVE = 46.0                       # 제목 영역
+    BOT_RESERVE = 40.0                       # 스케일바 영역
+
+    xs = [p[0] for p in boundary]
+    ys = [p[1] for p in boundary]
+    bx0, bx1 = min(xs), max(xs)
+    by0, by1 = min(ys), max(ys)
+    bw_mm = (bx1 - bx0) or 1.0
+    bh_mm = (by1 - by0) or 1.0
+
+    avail_w = PAGE_W - 2 * MARGIN
+    avail_h = PAGE_H - 2 * MARGIN - TOP_RESERVE - BOT_RESERVE
+    scale = min(avail_w / bw_mm, avail_h / bh_mm)   # pt per mm
+
+    draw_w = bw_mm * scale
+    draw_h = bh_mm * scale
+    off_x = MARGIN + (avail_w - draw_w) / 2.0
+    off_y = MARGIN + BOT_RESERVE + (avail_h - draw_h) / 2.0
+
+    def tx(x_mm):
+        return off_x + (x_mm - bx0) * scale
+
+    def ty(y_mm):
+        # 도면 Y는 아래로 증가 → PDF는 위로 증가하므로 뒤집기
+        return off_y + (by1 - y_mm) * scale
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+
+    # 제목
+    c.setFont(_KR_FONT, 14)
+    title = f"{_UNIT_LABELS.get(unit, unit or '')} 설계안"
+    c.drawString(MARGIN, PAGE_H - MARGIN - 6, title)
+    if when:
+        c.setFont(_KR_FONT, 9)
+        c.setFillGray(0.4)
+        c.drawRightString(PAGE_W - MARGIN, PAGE_H - MARGIN - 5, when)
+        c.setFillGray(0.0)
+
+    # 방 면적 채색 + 라벨
+    c.setFont(_KR_FONT, 9)
+    for rm in rooms or []:
+        poly = rm.get("poly") or []
+        if len(poly) < 3:
+            continue
+        path = c.beginPath()
+        path.moveTo(tx(poly[0][0]), ty(poly[0][1]))
+        for px, py in poly[1:]:
+            path.lineTo(tx(px), ty(py))
+        path.close()
+        c.setFillColorRGB(0.90, 0.94, 0.99)
+        c.setStrokeColorRGB(0.75, 0.82, 0.90)
+        c.setLineWidth(0.4)
+        c.drawPath(path, stroke=1, fill=1)
+        # 면적 라벨 (centroid)
+        cx = sum(p[0] for p in poly) / len(poly)
+        cy = sum(p[1] for p in poly) / len(poly)
+        area = rm.get("area_m2")
+        if area is not None:
+            c.setFillGray(0.15)
+            c.drawCentredString(tx(cx), ty(cy) - 4, f"{area} m²")
+
+    # 외곽선 (굵게)
+    c.setStrokeColorRGB(0.10, 0.42, 0.96)
+    c.setLineWidth(1.8)
+    ring = c.beginPath()
+    ring.moveTo(tx(boundary[0][0]), ty(boundary[0][1]))
+    for px, py in boundary[1:]:
+        ring.lineTo(tx(px), ty(py))
+    ring.close()
+    c.drawPath(ring, stroke=1, fill=0)
+
+    # 내벽 + 길이 라벨
+    c.setStrokeColorRGB(0.20, 0.22, 0.28)
+    c.setLineWidth(1.3)
+    for w in walls or []:
+        a = w.get("a"); b = w.get("b")
+        if not a or not b:
+            continue
+        ax, ay = tx(a[0]), ty(a[1])
+        bxp, byp = tx(b[0]), ty(b[1])
+        c.line(ax, ay, bxp, byp)
+        length_mm = math.hypot(b[0] - a[0], b[1] - a[1])
+        if length_mm < 1.0:
+            continue
+        mx, my = (ax + bxp) / 2.0, (ay + byp) / 2.0
+        ang = math.degrees(math.atan2(byp - ay, bxp - ax))
+        if ang > 90 or ang < -90:
+            ang += 180   # 글자 뒤집힘 방지
+        c.saveState()
+        c.translate(mx, my)
+        c.rotate(ang)
+        c.setFont(_KR_FONT, 7.5)
+        c.setFillGray(0.25)
+        c.drawCentredString(0, 2.5, f"{length_mm/1000:.2f} m")
+        c.restoreState()
+
+    # 전체 외곽 바운딩 치수 (가로 × 세로) — 변별 치수는 노이즈라 생략
+    c.setStrokeColorRGB(0.55, 0.55, 0.6)
+    c.setLineWidth(0.5)
+    c.setFont(_KR_FONT, 8.5)
+    c.setFillGray(0.3)
+    # 가로 (상단 위쪽)
+    y_dim = ty(by0) - 14
+    c.line(tx(bx0), y_dim, tx(bx1), y_dim)
+    c.drawCentredString((tx(bx0) + tx(bx1)) / 2.0, y_dim + 3, f"전체 가로 {bw_mm/1000:.2f} m")
+    # 세로 (좌측 바깥)
+    x_dim = tx(bx0) - 16
+    c.line(x_dim, ty(by0), x_dim, ty(by1))
+    c.saveState()
+    c.translate(x_dim - 3, (ty(by0) + ty(by1)) / 2.0)
+    c.rotate(90)
+    c.drawCentredString(0, 0, f"전체 세로 {bh_mm/1000:.2f} m")
+    c.restoreState()
+
+    # 스케일바 (1 m 기준, 너무 길면 0.5 m) + SCALE 근사
+    c.setFillGray(0.0)
+    bar_m = 1.0 if (1000 * scale) < (avail_w * 0.5) else 0.5
+    bar_pt = bar_m * 1000 * scale
+    sb_x = MARGIN
+    sb_y = MARGIN + 6
+    c.setLineWidth(2.0)
+    c.setStrokeGray(0.0)
+    c.line(sb_x, sb_y, sb_x + bar_pt, sb_y)
+    c.line(sb_x, sb_y - 3, sb_x, sb_y + 3)
+    c.line(sb_x + bar_pt, sb_y - 3, sb_x + bar_pt, sb_y + 3)
+    c.setFont(_KR_FONT, 8)
+    c.drawString(sb_x + bar_pt + 6, sb_y - 3, f"{bar_m:g} m")
+    # SCALE 근사: 1 도면mm 가 PDF에서 scale pt = scale/72*25.4 mm → 축척 1/N
+    real_per_paper = 1.0 / (scale * 25.4 / 72.0)   # 실제 mm per 종이 mm
+    c.drawRightString(PAGE_W - MARGIN, sb_y - 3, f"SCALE 1/{round(real_per_paper)}")
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+@app.post("/api/export-plan-pdf")
+async def export_plan_pdf(payload: dict):
+    from fastapi.responses import StreamingResponse
+    import io
+
+    boundary = payload.get("boundary_mm") or []
+    if len(boundary) < 3:
+        raise HTTPException(400, "boundary_mm 좌표가 3개 미만입니다.")
+    unit = payload.get("unit") or ""
+    walls = payload.get("walls") or []
+    rooms = payload.get("rooms") or []
+    when = (payload.get("when") or "").strip()
+
+    try:
+        pdf_bytes = _build_plan_pdf(unit, boundary, walls, rooms, when=when)
+    except Exception as e:
+        raise HTTPException(500, f"평면도 PDF 생성 실패: {str(e)}")
+
+    fname = payload.get("filename") or f"plan_{unit or 'unit'}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 # ─── 4단계: 인테리어 스타일 ─────────────────────────────────────────────────
 
 @app.post("/api/interior")

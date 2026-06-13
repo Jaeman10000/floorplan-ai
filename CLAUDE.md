@@ -358,11 +358,31 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         보존·A 그려저장(To-Be 메시52)·B 저장(키[A,B]·메시65)·종료(As-Is복원+To-Be유지)·
         재진입 A저장본 로드(벽1방2)→이어그려 재저장(벽2)·"그리던것지우기"(작업0·저장본2 유지)·
         "원본으로"(unitDesigns.A 삭제·키[B])·에러0.
-      ⚠️ 한계: unitDesigns는 페이지 메모리뿐(새로고침 시 소멸—beforeunload로 경고). 영속화
-        (백엔드/localStorage)는 다음 증분. 편집은 As-Is, 결과는 To-Be(그리기를 To-Be로 옮기진
-        않음). 클릭-클릭 점찍기 미구현.
-- [ ] 내부 설계 v1.2: unitDesigns 영속화(백엔드/localStorage)·방 이름 붙이기·클릭-클릭 그리기
-- [ ] 내부 설계 2단계(AI): 빈 외곽 보고 AI가 방 배치 초안 생성→JJ가 같은 도구로 편집
+      ⚠️ 한계: unitDesigns는 페이지 메모리뿐(새로고침 시 소멸—beforeunload로 경고). 손그림은
+        휘발성으로 두고, 영속화 대신 **결과를 파일로 내보내기**로 방향 전환(아래).
+- [x] **내보내기(3D PNG / 2D 평면도 PDF) — 현재 세대 결과를 파일로**.
+      ★방향 전환: "unitDesigns 영속화 / JSON 저장 라이브러리(designs 폴더·저장·목록·불러오기·
+      비교)"는 **폐기**(구현 안 함). 손그림은 휘발성 유지, 대신 그 세대 결과를 두 형식으로 다운로드.
+      ①3D PNG(프런트 `capture3dPng`): 설계 모드 메인 패널(roomScene+designGroup=현재 세대만)을
+        캡처. ★함정: 모든 WebGLRenderer가 preserveDrawingBuffer 꺼져 있어 toDataURL이 빈 이미지
+        위험 → renderParsed asis 렌더러에 `preserveDrawingBuffer:true` 한 플래그 + 캡처 직전
+        같은 턴에서 render→toDataURL(2중 안전). dataURL→Blob 다운로드.
+      ②2D 평면도 PDF(백엔드 `POST /api/export-plan-pdf`, reportlab): 현재 세대 외곽+내벽+방을
+        보내면 A4 세로에 bbox fit(Y뒤집기=도면상단이 PDF위)으로 그려 PDF 바이트 반환. 그리는 것=
+        외곽선(굵게)+내벽(각 선분 길이라벨 "2.40 m")+방 면적라벨("12.3 m²")+**전체 바운딩 치수만**
+        (가로×세로)+스케일바+SCALE 근사(fit배율 역산). ★외곽 변별 치수는 **안 넣음**(래스터추적
+        43정점 노이즈선까지 치수 박혀 지저분) — 깨끗이 스냅된 내벽 길이만 의미. 한글=reportlab
+        내장 CID폰트 `HYSMyeongJo-Medium`(폰트파일 동봉 불필요), 면적단위 ㎡(CJK합자) 대신
+        m²(U+00B2)로 글리프 누락 회피. 입력검증 boundary≥3점. requirements에 reportlab>=4.0.
+      ③UI: 설계 액션영역에 버튼 2개(🖼️ 3D PNG/📄 2D PDF), 그린 벽 있을 때만 활성
+        (updateDesignActions). 파일명 `{세대}_{YYYYMMDD_HHMM}`.
+      기존 설계 모드(designDrawing 가드·rAF루프·renderToBe·beforeunload) 무변경.
+      검증: ①백엔드 단독 — 더미좌표→%PDF헤더·pdfplumber 1페이지·텍스트추출. ②playwright
+        (_verify_export.py, 빌라 page3 A세대 실드래그) — 벽1방2·버튼활성·toDataURL 63710·
+        PNG파일 색분산99.2(비단색)·PDF %PDF 1페이지·파일명규칙·에러0. ③PDF를 pypdfium2로
+        이미지렌더해 육안확인(외곽·내벽6.91m·방면적·전체가로10.20m/세로16.25m·스케일바 깨끗).
+- [ ] 세대별 AI 구조 제안 (다음 증분): 빈 외곽+세대 방그룹 보고 AI가 방 배치 초안 생성→
+      JJ가 같은 그리기 도구로 편집(정밀좌표 약하니 초안만). 그 결과도 PNG/PDF로 내보내기 재사용.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅, 벽 두께 입히기(외벽>내벽)
 
 
