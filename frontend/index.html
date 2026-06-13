@@ -2317,7 +2317,7 @@ async function generateLayout() {
   if (!designBoundary || designBoundary.length < 3) { showStatus("외곽이 없습니다.", "error"); return; }
 
   if (designWalls.length) {
-    if (!confirm("기존에 그린 벽이 사라지고 AI 초안으로 대체됩니다. 계속할까요? (Ctrl+Z로 되돌릴 수 있음)")) return;
+    if (!confirm("그린 벽(고정 방 제외)이 AI 초안으로 대체됩니다. 고정 방은 보존됩니다. 계속할까요? (Ctrl+Z로 되돌릴 수 있음)")) return;
   }
 
   const roomsVal = document.getElementById("gen-rooms").value.trim();
@@ -2325,6 +2325,8 @@ async function generateLayout() {
   const body = {
     boundary_mm: designBoundary.map(p => p.slice()),
     unit: designUnit,
+    // 고정 방: AI가 침범 안 하게 백엔드가 사용가능영역에서 차감 (없으면 빈 배열 → 무영향)
+    fixed_rooms: designFixedRooms.map(fr => ({ name: fr.name, poly: fr.poly.map(p => p.slice()) })),
   };
   if (roomsVal !== "") body.rooms = parseInt(roomsVal, 10);
   if (bathsVal !== "") body.baths = parseInt(bathsVal, 10);
@@ -2345,6 +2347,7 @@ async function generateLayout() {
     designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
     if (designHistory.length > 50) designHistory.shift();
     designWalls = aiWalls;
+    ensureLockedWalls();   // 고정 방 벽 재주입 + dedup (고정 방 없으면 no-op) — 고정 방 보존
     designRoomNames = (data.rooms || []).map(r => ({ name: r.name, cx: r.cx, cy: r.cy }));
     recomputeDesignRooms();
     renderDesignWalls();

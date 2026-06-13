@@ -273,14 +273,16 @@ _LAYOUT_SYSTEM = (
     "1. '방'은 침실만 의미한다. 침실을 정확히 N개, 욕실(화장실)을 정확히 M개 둔다. "
     "개수를 임의로 바꾸지 마라.\n"
     "2. 침실 N·욕실 M에 더해 한국 주거의 기본 공용공간을 반드시 포함한다: "
-    "현관, 거실, 주방(또는 거실과 합친 LDK), 다용도실.\n"
+    "현관, 거실, 주방(또는 거실과 합친 LDK), 다용도실. "
+    "단 '이미 고정된 공간'으로 제시된 용도는 이미 배치된 것이니 다시 만들지 마라.\n"
     "3. 거실은 동선의 허브다. 현관·주방·욕실·모든 침실이 거실에 '직접 접하도록'(거실의 "
     "변과 맞붙도록) 배치한다. 빌라 규모이므로 별도 복도 없이 거실이 동선 공간을 겸한다.\n"
     "4. 막힌 방 금지: 어떤 방도 다른 침실을 거쳐야만 들어가는 구조여선 안 된다. 모든 방은 "
     "거실 또는 현관에서 직접 들어갈 수 있어야 한다.\n"
     "[기하 — 반드시 지킴]\n"
     "5. 모든 방은 축정렬 직사각형이며 좌표(x,y,w,h)는 100mm 격자(100의 배수)다.\n"
-    "6. 모든 방은 외곽 bbox(가로 W × 세로 H) 안에만 둔다.\n"
+    "6. 모든 방은 외곽 bbox(가로 W × 세로 H) 안에만 둔다. "
+    "'이미 고정된 공간'의 영역은 절대 침범하지 마라(겹치는 방을 만들지 마라).\n"
     "7. 인접한 방끼리는 변을 '정확히 공유'하며 맞붙는다(같은 좌표의 변을 공유). 방과 방 "
     "사이에 빈틈을 두지 마라 — 닫히지 않는 빈 공간이 생기면 안 된다.\n"
     "8. 빈틈은 '방들과 불규칙한 외곽선 사이'에만 허용된다(직사각형으로 외곽을 완벽히 채울 "
@@ -293,19 +295,58 @@ _LAYOUT_SYSTEM = (
 )
 
 
-def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths):
+def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
+                         fixed_rooms=None, avail_bbox=None):
+    """레이아웃 생성 프롬프트.
+    고정 방이 있으면 외곽 폴리곤 대신 '사용가능영역 bbox'를 주고(정밀 폴리곤을 AI가
+    따라 그리길 기대하지 않음 — MultiPolygon이면 더 헷갈림), 고정 영역의 bbox·이름을
+    명시해 침범 금지. 실제 방어선은 백엔드의 avail 교차 클립(이중 안전망)이다."""
     bx0, by0, bx1, by1 = bbox
-    coords = ", ".join(f"[{int(round(x))},{int(round(y))}]" for x, y in boundary)
-    return (
-        f"[세대] {unit or '미지정'}\n"
-        f"[외곽 bbox] 좌상단 ({int(bx0)},{int(by0)}) ~ 우하단 ({int(bx1)},{int(by1)}) "
-        f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
-        f"전용면적 약 {area_m2}㎡\n"
-        f"[외곽 폴리곤 좌표(mm)]\n[{coords}]\n"
-        f"[요청] 이 외곽 안에 침실 {rooms}개, 욕실 {baths}개 + 기본 공용공간(현관·거실·"
-        f"주방 또는 LDK·다용도실)을 직사각형으로 배치하라. 거실을 동선 허브로 모든 공간이 "
-        f"거실에 접하게 하고, 방 사이 빈틈 없이 변을 공유하라. JSON rooms만 출력."
-    )
+    fixed_rooms = fixed_rooms or []
+    base_public = ["현관", "거실", "주방(또는 LDK)", "다용도실"]
+    fixed_names = [str(fr.get("name") or "").strip() for fr in fixed_rooms]
+    fixed_names = [n for n in fixed_names if n]
+    # 이미 고정된 용도는 만들어야 할 공용공간 목록에서 제외
+    public_todo = [p for p in base_public
+                   if not any(n and (n in p or p.split("(")[0] in n) for n in fixed_names)]
+    public_str = "·".join(public_todo) if public_todo else "(추가 공용공간 없음 — 이미 고정됨)"
+
+    lines = [f"[세대] {unit or '미지정'}"]
+    if fixed_rooms and avail_bbox is not None:
+        ax0, ay0, ax1, ay1 = avail_bbox
+        lines.append(
+            f"[사용가능영역 bbox] 좌상단 ({int(ax0)},{int(ay0)}) ~ 우하단 ({int(ax1)},{int(ay1)}) "
+            f"= 가로 {round((ax1 - ax0) / 1000, 2)}m × 세로 {round((ay1 - ay0) / 1000, 2)}m"
+        )
+        lines.append("[이미 고정된 공간 — 침범·재생성 금지]")
+        for fr in fixed_rooms:
+            fxs = [float(p[0]) for p in fr.get("poly") or []]
+            fys = [float(p[1]) for p in fr.get("poly") or []]
+            if fxs and fys:
+                lines.append(
+                    f"  · {str(fr.get('name') or '고정방')}: 영역 bbox "
+                    f"({int(min(fxs))},{int(min(fys))})~({int(max(fxs))},{int(max(fys))})"
+                )
+        lines.append(
+            f"[요청] 위 '사용가능영역 bbox' 안에서, 이미 고정된 영역은 절대 침범하지 말고 "
+            f"나머지 빈 공간에만 침실 {rooms}개, 욕실 {baths}개 + 공용공간({public_str})을 "
+            f"직사각형으로 배치하라. 이미 고정된 용도는 다시 만들지 마라. 거실을 동선 허브로 "
+            f"모든 공간이 거실에 접하게 하고, 방 사이 빈틈 없이 변을 공유하라. JSON rooms만 출력."
+        )
+    else:
+        coords = ", ".join(f"[{int(round(x))},{int(round(y))}]" for x, y in boundary)
+        lines.append(
+            f"[외곽 bbox] 좌상단 ({int(bx0)},{int(by0)}) ~ 우하단 ({int(bx1)},{int(by1)}) "
+            f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
+            f"전용면적 약 {area_m2}㎡"
+        )
+        lines.append(f"[외곽 폴리곤 좌표(mm)]\n[{coords}]")
+        lines.append(
+            f"[요청] 이 외곽 안에 침실 {rooms}개, 욕실 {baths}개 + 기본 공용공간({public_str})을 "
+            f"직사각형으로 배치하라. 거실을 동선 허브로 모든 공간이 거실에 접하게 하고, "
+            f"방 사이 빈틈 없이 변을 공유하라. JSON rooms만 출력."
+        )
+    return "\n".join(lines)
 
 
 def _snap_grid(v):
@@ -345,16 +386,19 @@ def _parse_rooms_json(text):
     return out
 
 
-def _rects_to_rooms_and_walls(rects, boundary):
+def _rects_to_rooms_and_walls(rects, boundary, clip_poly=None):
     """AI 직사각형 목록 → (생존 방 리스트, 벽 선분 리스트).
-    각 rect: 100mm 격자 스냅 → 외곽 폴리곤과 '정확 intersection'(외곽 밖 통과 금지) →
+    각 rect: 100mm 격자 스냅 → 클립영역과 '정확 intersection'(영역 밖 통과 금지) →
     area<1㎡면 버림 → representative_point(L자여도 내부 보장)로 중심.
     생존한 rect의 격자 사각형 4변을 모아 _postprocess_walls(스냅·buffer50 클립·degenerate·
-    dedup)로 벽 생성 — 인접 방 공유변은 dedup으로 1개가 된다."""
+    dedup)로 벽 생성 — 인접 방 공유변은 dedup으로 1개가 된다.
+    clip_poly: 주어지면(고정 방 제외한 사용가능영역, MultiPolygon 가능) 외곽 대신 이걸로
+    교차 클립 — 고정 영역과 겹치는 rect 부분은 잘려나간다(이중 안전망)."""
     from shapely.geometry import Polygon
     bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
     if not bpoly.is_valid:
         bpoly = bpoly.buffer(0)
+    clip_region = clip_poly if clip_poly is not None else bpoly
 
     rooms_out, edge_segs = [], []
     for r in rects:
@@ -364,7 +408,7 @@ def _rects_to_rooms_and_walls(rects, boundary):
             continue
         rect = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
         try:
-            clip = rect.intersection(bpoly)   # buffer 없는 정확 클립 — 외곽 밖 절대 통과 금지
+            clip = rect.intersection(clip_region)   # buffer 없는 정확 클립 — 영역 밖·고정 영역 통과 금지
         except Exception:
             continue
         if clip.is_empty or clip.area < 1e6:   # <1㎡ 버림
@@ -383,15 +427,17 @@ def _rects_to_rooms_and_walls(rects, boundary):
         edge_segs.append({"a": [x1, y1], "b": [x0, y1]})
         edge_segs.append({"a": [x0, y1], "b": [x0, y0]})
 
-    walls = _postprocess_walls(edge_segs, boundary)
+    walls = _postprocess_walls(edge_segs, boundary, clip_poly=clip_poly)
     return rooms_out, walls
 
 
-def _postprocess_walls(walls, boundary):
-    """100mm 격자 스냅 → degenerate 제거 → dedup → 외곽 buffer(50) 클립.
-    클립 결과 MultiLineString은 조각화, 100mm 미만 조각은 버림."""
+def _postprocess_walls(walls, boundary, clip_poly=None):
+    """100mm 격자 스냅 → degenerate 제거 → dedup → 클립영역 buffer(50) 클립.
+    클립 결과 MultiLineString은 조각화, 100mm 미만 조각은 버림.
+    clip_poly: 주어지면 외곽 대신 사용가능영역(고정 방 제외)으로 벽을 클립."""
     from shapely.geometry import Polygon, LineString
-    bpoly = Polygon([(float(x), float(y)) for x, y in boundary]).buffer(50)
+    base = clip_poly if clip_poly is not None else Polygon([(float(x), float(y)) for x, y in boundary])
+    bpoly = base.buffer(50)
 
     snapped = []
     for w in walls:
@@ -460,7 +506,48 @@ async def generate_layout(payload: dict):
     ys = [float(p[1]) for p in boundary]
     bbox = (min(xs), min(ys), max(xs), max(ys))
     from shapely.geometry import Polygon
-    area_m2 = round(Polygon([(float(x), float(y)) for x, y in boundary]).area / 1e6, 1)
+    from shapely.ops import unary_union
+    bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
+    if not bpoly.is_valid:
+        bpoly = bpoly.buffer(0)
+    area_m2 = round(bpoly.area / 1e6, 1)
+
+    # 고정 방: JJ가 잠근 공간 [{name, poly}] — 사용가능영역에서 차감(이중 안전망의 클립 영역)
+    fixed_in = payload.get("fixed_rooms") or []
+    fixed_rooms = []
+    fixed_polys = []
+    for fr in fixed_in:
+        poly = fr.get("poly") or []
+        if len(poly) < 3:
+            continue
+        try:
+            fp = Polygon([(float(p[0]), float(p[1])) for p in poly])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not fp.is_valid:
+            fp = fp.buffer(0)
+        if fp.is_empty or fp.area <= 0:
+            continue
+        fixed_rooms.append({"name": str(fr.get("name") or "고정방").strip() or "고정방",
+                            "poly": [[float(p[0]), float(p[1])] for p in poly]})
+        fixed_polys.append(fp)
+
+    # 사용가능영역 = 외곽 − ∪(고정 방). 고정 방 없으면 외곽 전체.
+    avail = bpoly
+    avail_bbox = None
+    if fixed_polys:
+        try:
+            fixed_union = unary_union(fixed_polys)
+            avail = bpoly.difference(fixed_union).buffer(0)
+        except Exception as e:
+            raise HTTPException(500, f"사용가능영역 계산 실패: {str(e)}")
+        if avail.is_empty or avail.area < 2e6:   # 2㎡ 미만이면 배치할 공간이 없음
+            raise HTTPException(
+                422,
+                "고정 방을 빼면 AI가 배치할 빈 공간이 거의 없습니다. 고정 방을 줄여 보세요.",
+            )
+        ab = avail.bounds   # (minx, miny, maxx, maxy)
+        avail_bbox = (ab[0], ab[1], ab[2], ab[3])
 
     # 방/화장실 개수: JJ 입력 우선, 없으면 면적 기반 기본값
     def _as_int(v):
@@ -487,7 +574,8 @@ async def generate_layout(payload: dict):
             system=_LAYOUT_SYSTEM,
             messages=[{
                 "role": "user",
-                "content": _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths),
+                "content": _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
+                                                fixed_rooms=fixed_rooms, avail_bbox=avail_bbox),
             }],
         )
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
@@ -500,7 +588,7 @@ async def generate_layout(payload: dict):
             422,
             "AI가 유효한 방을 만들지 못했습니다(파싱 실패). 기존 작업은 그대로입니다. 다시 시도해 보세요.",
         )
-    room_list, walls = _rects_to_rooms_and_walls(rects, boundary)
+    room_list, walls = _rects_to_rooms_and_walls(rects, boundary, clip_poly=avail if fixed_polys else None)
     if not room_list or not walls:
         raise HTTPException(
             422,

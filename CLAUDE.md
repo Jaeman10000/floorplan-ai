@@ -544,8 +544,44 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         _verify_genlayout/_verify_export) 전부 통과. ②(JJ 수동·필수) 실제 브라우저: A 묶기→설계(현관
         고정, 저장 안 함)→묶기 모드 갔다 옴→설계 유지 / 새로고침+같은 PDF 재업로드→묶기 복원+토스트 /
         세대 경계 바꿔 재진입→경고 confirm 유지·다시시작 둘 다. **오피스텔로도 1회**. 통과 전 미완료.
-- [ ] **세대별 AI 구조 제안 — 고정 방 연결**(다음 증분): generate-layout에 `fixed_rooms` 전달 +
-      백엔드 `외곽−고정방` difference로 빈 영역만 AI 배치 → 고정 방 합쳐 반환. 잠긴 방 위 그리기 가드.
+- [x] **세대별 AI 구조 제안 — 고정 방 연결**(generate-layout이 고정 방을 빼고 나머지만 배치).
+      흐름: JJ가 위치 아는 공간(현관 등)을 직접 그려 🔒 잠금 → AI 초안 생성 시 그 고정 영역을
+      빼고 남은 빈 공간에만 AI가 방 배치 → 고정 방은 그대로 보존·합쳐 표시.
+      **백엔드 `generate_layout`**: payload에 `fixed_rooms:[{name, poly}]` 받음. 유효 poly(≥3점)만
+        shapely Polygon화(buffer(0) 보정)→`unary_union`→`avail = bpoly.difference(fixed_union).buffer(0)`.
+        **avail.is_empty 또는 area<2㎡면 422**(배치 공간 없음, 기존 작업 보존). avail.bounds로 avail_bbox.
+        **★사용가능영역 MultiPolygon 처리**: AI엔 정밀 폴리곤을 안 주고(따라 그리길 기대 안 함, MultiPolygon
+        이면 더 헷갈림) **avail bbox + 고정 영역 bbox·이름 + "침범 금지"**만 명시. 실제 방어선은 백엔드
+        이중 안전망 — `_rects_to_rooms_and_walls(.., clip_poly=avail)`·`_postprocess_walls(.., clip_poly=avail)`로
+        rect/벽을 avail로 교차 클립(MultiPolygon이어도 intersection 그대로 동작 → 영역 전체로 클립,
+        고정 영역 겹치는 부분 잘림). **두 함수에 `clip_poly` 옵션 인자 추가(기본=None=기존 bpoly 동작
+        → 기존 호출부 무영향)**. 응답 형식 불변(walls=AI 벽만, 고정 방 벽은 프런트가 재주입).
+      **프롬프트**(`_build_layout_prompt`에 fixed_rooms·avail_bbox 인자): 고정 있으면 외곽 폴리곤 대신
+        avail bbox + "[이미 고정된 공간 — 침범·재생성 금지]" 섹션(이름·bbox). 만들 공용공간 목록에서
+        **이미 고정된 이름 제외**(현관 고정 시 요청줄에서 현관 빠지고 거실·주방·다용도실만). `_LAYOUT_SYSTEM`
+        규칙2·6에 "이미 고정된 용도 재생성 금지"·"고정 영역 침범 금지" 명시.
+      **프런트 `generateLayout`**: body에 `fixed_rooms=designFixedRooms.map({name,poly})` 추가(고정 없으면
+        빈 배열=무영향). 성공 시 `designWalls=aiWalls` 후 **`ensureLockedWalls()`**(고정 방 poly 변 재주입
+        +dedup, 고정 없으면 no-op)로 고정 방 벽 보존. confirm 문구="그린 벽(고정 방 제외)이 AI 초안으로
+        대체됩니다. 고정 방은 보존됩니다." designHistory push 그대로(=AI 초안 undo 1단위, Ctrl+Z로 생성
+        직전=고정방만 남은 상태로 복귀). 이름 매칭: `recomputeDesignRooms`가 고정 면=잠금 이름(AI보다
+        우선)·AI 면=AI 이름, `designRoomNames`엔 AI 방만(현 코드 그대로).
+      무수정: 클릭-클릭/snapPoint/undo/고정방 잠금(lockSelectedFace 등)/autosave/묶기 localStorage/
+        내보내기/planarFaces/renderToBe/beforeunload 안 건드림. clip_poly 옵션은 기본값=기존 동작.
+      검증: ①(자동) `_verify_fixedlayout_backend.py` — avail=difference(고정2개 80−8=72㎡·점
+        포함판정)·MultiPolygon avail 클립(가운데 코어 빼면 좌/우 2조각, 가로지르는 rect 큰조각 생존·중심
+        코어 밖)·clip_poly로 고정 영역 겹치는 rect 16→12㎡ 잘림(clip_poly=None이면 16 전부=기존 보존)·
+        벽도 고정 내부 구간 제거·avail<2㎡ 판정·프롬프트 고정 이름 제외, 21/21 통과. ②(자동)
+        `_verify_fixedlayout.py`(빌라 page3 A세대, **실제 클릭** + page.route 목) — 현관 그려 잠금→AI
+        생성 시 **요청 body에 fixed_rooms 실림**(name·poly)·주입 후 고정 방 보존(designFixedRooms=1·
+        현관 잠금 면 존재)·벽 전부 외곽 안·Ctrl+Z로 AI 초안만 취소(고정 방 보존)·에러0. 회귀
+        (_verify_fixedroom/_verify_clickdraw/_verify_genlayout/_verify_export/_verify_genlayout_backend)
+        전부 통과. ③(JJ 수동·필수) 빌라 page3 A세대: 현관 그려 고정→침실2 욕실1→AI 생성→ⓐ현관 보존
+        ⓑAI 방이 현관 침범 안 함 ⓒ현관 뺀 나머지만 채움 ⓓ현관 중복 생성 안 됨 ⓔ클릭-클릭 편집·Ctrl+Z.
+        고정 2개(현관+다용도실)로도 1회. **오피스텔로도 1회**. 통과 전 미완료.
+      ⚠️ **ANTHROPIC_API_KEY 필요**(ai-advice·genlayout과 동일). 자동검증은 목으로 키 없이 가능.
+      ⚠️ **잠긴 방 위에 새 벽 그어 면 쪼개기 가드는 아직 없음**(다음 증분).
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
+- [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)
 
 
