@@ -391,6 +391,19 @@
     #edit-info .ei-title { font-size: 11px; color: #ffa733; font-weight: 700; margin-bottom: 6px; }
     #edit-areas { font-size: 12px; color: #ddd; line-height: 1.7; }
     .edit-hint { font-size: 10px; color: #555; margin-top: 6px; line-height: 1.5; }
+    /* 편집할 세대 선택 버튼 */
+    .eu-btn {
+      flex: 1; padding: 7px 4px; font-size: 11px; font-weight: 600;
+      border-radius: 6px; border: 1px solid #2a2a35;
+      background: #13131a; color: #888; cursor: pointer; transition: all 0.15s;
+    }
+    .eu-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .eu-btn:not(:disabled):hover { border-color: #3a3a45; color: #bbb; }
+    .eu-btn.active { color: #fff; }
+    .eu-btn[data-unit="A"].active      { background: #1e3a8a; border-color: #3b82f6; }
+    .eu-btn[data-unit="B"].active      { background: #14532d; border-color: #22c55e; }
+    .eu-btn[data-unit="C"].active      { background: #7c2d12; border-color: #f97316; }
+    .eu-btn[data-unit="common"].active { background: #374151; border-color: #9ca3af; }
   </style>
 </head>
 <body>
@@ -517,6 +530,15 @@
     <div>
       <div class="section-label">🔧 구조 편집</div>
       <button class="action-btn btn-secondary" id="btn-edit-mode" disabled>벽 이동 모드 시작</button>
+      <div id="edit-unit-picker" style="display:none; margin-top:10px;">
+        <div style="font-size:11px; color:#888; margin-bottom:6px;">편집할 세대 (지정된 세대만)</div>
+        <div class="unit-btns">
+          <button class="eu-btn" data-unit="A">A세대</button>
+          <button class="eu-btn" data-unit="B">B세대</button>
+          <button class="eu-btn" data-unit="C">C세대</button>
+          <button class="eu-btn" data-unit="common">공용</button>
+        </div>
+      </div>
       <div id="edit-info">
         <div class="ei-title">선택된 벽 — 드래그로 이동</div>
         <div id="edit-areas">—</div>
@@ -607,6 +629,7 @@ const UNIT_LABELS = { A: "A세대", B: "B세대", C: "C세대", common: "공용"
 
 // 구조 편집(벽 이동) 상태
 let editMode = false;          // 구조 편집 모드 on/off
+let editUnit = null;           // 편집 대상 세대 (이 세대 방의 벽만 편집)
 let roomRenderer = null;       // asis 렌더러 (groundPoint/raycast용)
 let roomRings = [];            // 방 경계선 Line (라이브 갱신용)
 let wallExtrudeMesh = null;    // 외곽−방 압출 벽 메시 (라이브 갱신용)
@@ -1036,12 +1059,15 @@ function renderParsed(panelId, phId, data, key) {
   if (key === "asis") {
     let mdPos = null;
 
-    // 구조 편집: 선택된 벽 위에서 드래그 시작 → orbit 가로채기(capture 단계 stopImmediatePropagation)
+    // 구조 편집: 편집 가능한 벽 피커 위를 누르면 즉시 선택+드래그 시작
+    // (orbit이 등록 순서상 먼저 도므로 stopImmediatePropagation만으로 못 막음 →
+    //  orbit mousemove에 wallDragging 가드를 둬서 회전을 차단한다)
     renderer.domElement.addEventListener("mousedown", e => {
-      if (!editMode || e.button !== 0 || selectedWallId === null) return;
-      const picker = wallPickers[selectedWallId];
-      if (!picker) return;
-      if (rayHits(e, [picker]).length) {
+      if (!editMode || e.button !== 0 || !wallPickers.length) return;
+      const hits = rayHits(e, wallPickers);
+      if (hits.length) {
+        const id = hits[0].object.userData.wallId;
+        if (id !== selectedWallId) selectWall(id);
         wallDragging = true; wallJustDragged = false;
         dragLastGround = groundPoint(e);
         e.stopImmediatePropagation(); e.preventDefault();
@@ -1121,6 +1147,7 @@ function attachOrbit(renderer, camera, cx, cz, maxDist) {
   renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
   window.addEventListener("mouseup", () => isDragging = false);
   window.addEventListener("mousemove", e => {
+    if (wallDragging) return;   // 벽 드래그 중엔 카메라 회전/팬 금지 (드래그-회전 충돌 차단)
     if (!isDragging) return;
     const dx = e.clientX - prevMouse.x, dy = e.clientY - prevMouse.y;
     prevMouse = { x: e.clientX, y: e.clientY };
@@ -1549,12 +1576,17 @@ function pairWalls(clusters, axis) {
   return walls;
 }
 
-function buildWallModel() {
+// 선택된 세대(unit)의 방 정점만 클러스터링 → 그 세대 내벽만 추출
+// (전체 30방을 한꺼번에 묶으면 다른 세대 벽이 같은 좌표선에 우연히 걸려 유령 벽 발생)
+function buildWallModel(unit) {
   wallModel = [];
-  if (!parsedData) return;
+  if (!parsedData || !unit) return;
   const items = [];
-  parsedData.rooms.forEach((rm, r) =>
-    rm.polygon_mm.forEach((p, v) => items.push({ r, v, x: p[0], y: p[1] })));
+  parsedData.rooms.forEach((rm, r) => {
+    if (rm.unit !== unit) return;   // 선택 세대 방만 — 외벽·타세대·세대경계벽 자동 제외
+    rm.polygon_mm.forEach((p, v) => items.push({ r, v, x: p[0], y: p[1] }));
+  });
+  if (items.length < 2) return;
   wallModel = pairWalls(clusterCoord(items, "x"), "V")
     .concat(pairWalls(clusterCoord(items, "y"), "H"));
 }
@@ -1678,14 +1710,14 @@ function commitWallMove() {
   const aff = [...new Set(wallModel[selectedWallId].members.map(m => m.r))];
   aff.forEach(refreshLabel);
   showStatus("✅ 벽 이동 완료 — 접한 방 면적 갱신.", "ok");
-  // 좌표가 바뀌었으니 모델/피커 재구성(다음 편집은 새 형상 기준)
-  buildWallModel();
+  // 좌표가 바뀌었으니 모델/피커 재구성(선택 세대 범위 유지)
+  buildWallModel(editUnit);
   createWallPickers();
   selectWall(null);
 }
 
 function resetEditUI() {
-  editMode = false;
+  editMode = false; editUnit = null;
   destroyWallPickers();
   selectedWallId = null; wallDragging = false;
   const btn = document.getElementById("btn-edit-mode");
@@ -1693,12 +1725,37 @@ function resetEditUI() {
   btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary");
   document.getElementById("edit-info").style.display = "none";
   document.getElementById("edit-hint-main").style.display = "none";
+  document.getElementById("edit-unit-picker").style.display = "none";
+}
+
+// 지정된 세대 목록을 받아 "편집할 세대" 버튼 활성/비활성
+function buildEditUnitButtons(assignedUnits) {
+  document.querySelectorAll(".eu-btn").forEach(b =>
+    b.disabled = !assignedUnits.includes(b.dataset.unit));
+}
+
+// 편집 대상 세대 선택 → 그 세대 방 정점만 클러스터링해 내벽 피커 표시
+function selectEditUnit(u) {
+  editUnit = u;
+  document.querySelectorAll(".eu-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === u));
+  buildWallModel(u);
+  createWallPickers();
+  selectWall(null);
+  showStatus(wallModel.length
+    ? `🔧 ${UNIT_LABELS[u]} 편집 — 이동 가능한 내벽 ${wallModel.length}개(주황). 누른 채 드래그.`
+    : `${UNIT_LABELS[u]}에 이동 가능한 직선 내벽이 없습니다.`, wallModel.length ? "info" : "error");
 }
 
 function setEditMode(on) {
-  editMode = on;
   const btn = document.getElementById("btn-edit-mode");
   if (on) {
+    // 요구사항 1: 세대가 하나 이상 지정돼 있어야 편집 가능
+    const assigned = [...new Set((parsedData ? parsedData.rooms : []).map(r => r.unit).filter(Boolean))];
+    if (!assigned.length) {
+      showStatus("먼저 '세대 묶기'로 방을 세대에 지정하고, 편집할 세대를 선택하세요.", "error");
+      return;  // 진입 차단 (editMode 유지 false)
+    }
+    editMode = true;
     // 세대 묶기와 충돌 방지 — 켜져 있으면 끈다
     if (unitMode) {
       unitMode = false;
@@ -1708,21 +1765,21 @@ function setEditMode(on) {
       ub.classList.remove("btn-primary"); ub.classList.add("btn-secondary");
     }
     selectRoom(null);
-    buildWallModel();
-    createWallPickers();
     btn.textContent = "벽 이동 모드 종료";
     btn.classList.remove("btn-secondary"); btn.classList.add("btn-primary");
     document.getElementById("edit-hint-main").style.display = "block";
-    document.getElementById("edit-info").style.display = "none";
-    showStatus(wallModel.length
-      ? `🔧 구조 편집 — 이동 가능한 벽 ${wallModel.length}개(주황). 클릭 선택 후 드래그.`
-      : "이동 가능한 직선 내벽을 찾지 못했습니다.", wallModel.length ? "info" : "error");
+    document.getElementById("edit-unit-picker").style.display = "block";
+    buildEditUnitButtons(assigned);
+    // 편집할 세대 자동 선택 (직전 currentUnit이 지정돼 있으면 그것, 아니면 첫 세대)
+    selectEditUnit(assigned.includes(currentUnit) ? currentUnit : assigned[0]);
   } else {
     resetEditUI();
     showStatus("구조 편집 모드를 종료했습니다.", "ok");
   }
 }
 document.getElementById("btn-edit-mode").addEventListener("click", () => setEditMode(!editMode));
+document.querySelectorAll(".eu-btn").forEach(b =>
+  b.addEventListener("click", () => { if (!b.disabled) selectEditUnit(b.dataset.unit); }));
 
 // 벽 드래그 추적 (window 싱글톤 — 캔버스 재생성과 무관, 중복 적용 방지)
 window.addEventListener("mousemove", e => {
@@ -1738,7 +1795,8 @@ window.addEventListener("mousemove", e => {
 window.addEventListener("mouseup", () => {
   if (!wallDragging) return;
   wallDragging = false;
-  commitWallMove();
+  if (wallJustDragged) commitWallMove();  // 실제 이동했을 때만 확정 (단순 클릭=선택 유지)
+  wallJustDragged = false;
 });
 
 function applyRoomName() {
