@@ -558,12 +558,33 @@
           <button class="btn-secondary" id="btn-clear-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>그리던 것 지우기</button>
           <button class="btn-secondary" id="btn-revert-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>이 세대 원본으로</button>
         </div>
+        <!-- 고정 방(현관 등 위치 아는 공간) 그려 잠그기 -->
+        <button class="btn-secondary" id="btn-fix-mode" style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; margin-top:4px;">🔒 고정 방 지정</button>
+        <div id="design-fix-panel" style="display:none; padding:8px; background:#161a22; border-radius:8px;">
+          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">선택한 면에 이름을 정하고 고정으로 잠그세요</div>
+          <select id="design-fix-select" style="width:100%; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            <option value="">— 직접 입력 —</option>
+            <option value="현관">현관</option>
+            <option value="다용도실">다용도실</option>
+            <option value="발코니">발코니</option>
+            <option value="팬트리">팬트리</option>
+            <option value="창고">창고</option>
+            <option value="계단실">계단실</option>
+            <option value="보일러실">보일러실</option>
+            <option value="드레스룸">드레스룸</option>
+          </select>
+          <input type="text" id="design-fix-input" placeholder="또는 직접 입력..." style="width:100%; margin-top:6px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+          <button class="action-btn btn-primary" id="btn-lock-fixed" style="width:100%; margin-top:8px; padding:9px;" disabled>🔒 고정으로 잠금</button>
+        </div>
+        <div id="design-fix-list" style="display:none; font-size:12px; color:#ddd;"></div>
       </div>
       <div class="edit-hint" id="design-hint" style="display:none;">
         내벽이 사라진 빈 외곽에 <b>시작점 클릭 → 끝점 클릭</b>으로 벽을 그으세요(드래그 아님).
         거의 수평/수직이면 <b>직각으로 자동 정렬</b>되고, <b>Shift</b>를 누르면 자유 각도입니다.
         기존 벽·외곽 근처면 붙어서 그려져 벽이 만나면 닫힌 공간이 자동으로 방이 됩니다.<br>
         <b>💾 저장</b>하면 우측 To-Be 패널에 새 구조로 남고, 종료/재진입해도 유지됩니다.<br>
+        <b>🔒 고정 방 지정</b>을 켜고 닫힌 방을 클릭→이름을 정해 잠그면 현관·다용도실처럼
+        위치가 정해진 공간으로 고정됩니다(<b>그리던 것 지우기에도 보존</b>).<br>
         우드래그=카메라 · <b>Esc/우클릭=그리던 선 취소</b> · Ctrl+Z=되돌리기.
       </div>
     </div>
@@ -656,8 +677,12 @@ let designMode = false;        // 내부 설계 모드 on/off
 let designUnit = null;         // 설계 대상 세대
 let designBoundary = null;     // 빈 외곽 ring (mm) — 백엔드 shapely union 결과
 let designWalls = [];          // JJ가 그린 벽 선분 [{a:[x,y], b:[x,y]}]
-let designRooms = [];          // 닫힌 면 = 방 [{poly, area_m2, color}]
+let designRooms = [];          // 닫힌 면 = 방 [{poly, area_m2, color, name, locked}]
 let designRoomNames = [];      // AI가 준 방 이름+중심 [{name, cx, cy}] — 면 중심 매칭용 (best effort)
+let designFixedRooms = [];     // JJ가 잠근 고정 방 [{name, poly(mm)}] — 이름+레지스트리+핸드오프 데이터
+let designFixMode = false;     // 🔒 고정 방 지정 서브모드 (ON이면 좌클릭=면 선택)
+let selectedDesignFace = -1;   // 고정 모드에서 선택된 designRooms 인덱스 (-1=없음)
+let _designRoomTiles = [];     // 방 타일 메시(raycast용, userData.faceIdx) — 라벨과 분리
 let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
 let designDrawing = false;     // 그리기 진행중 (첫 점 찍힘, 둘째 클릭 대기) = drawStart!=null
 let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm (null=idle)
@@ -971,6 +996,8 @@ const ROOM_PALETTE = [
   0xc24fa8, 0x9bbf3a, 0xd98aa8, 0x3a8a7a, 0xb09ad0, 0xa87a3a,
   0xb04a4a, 0x6a8a4a, 0x5a9ad0, 0xc0a040,
 ];
+const _LOCK_COLOR = 0x64748b;   // 고정(잠긴) 방 표시색 — 슬레이트
+const _FACE_SELECT_COLOR = 0xffd700;  // 고정 모드에서 선택된 면 강조색 — 금색
 
 // ── Three.js: 벡터 PDF 파싱 결과 렌더 (외곽+내벽+방+이름) ──────────────────
 function renderParsed(panelId, phId, data, key) {
@@ -1661,6 +1688,24 @@ window.addEventListener("mouseup", e => {
   _drawDownXY = null;
   if (moved > _CLICK_MAX_PX) return;   // 드래그였음 → 점 안 찍음(손떨림·미세이동 무시)
 
+  // 🔒 고정 모드: 좌클릭 = 방 타일 raycast 면 선택 (벽 그리기 안 탐)
+  if (designFixMode) {
+    const rect = roomRenderer.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(mouse, roomCamera);
+    const hits = ray.intersectObjects(_designRoomTiles);
+    if (hits.length) {
+      const idx = hits[0].object.userData.faceIdx;
+      selectDesignFace(idx === selectedDesignFace ? -1 : idx);   // 재클릭 = 해제
+    } else {
+      selectDesignFace(-1);
+    }
+    return;
+  }
+
   const raw = groundMM(e);
   if (!raw) return;
   if (!drawStart) {
@@ -1791,20 +1836,35 @@ function recomputeDesignRooms() {
   const faces = planarFaces(segs);
   // 외곽 면적 (외부면 식별·전체와 동일면 제거용)
   const outArea = shoelaceArea(b);
+  const fixedHit = new Array(designFixedRooms.length).fill(false);   // 스테일 lock reconcile용
   let ci = 0;
   for (const f of faces) {
     const ar = shoelaceArea(f);
     if (ar < _FACE_MIN_AREA) continue;                 // 너무 작은 면 제외
     if (ar > outArea * 0.97) continue;                 // 외곽 전체와 동일(=아직 안 나뉨)·외부면 제외
-    // AI 방 이름 매칭(best effort): 면 안에 들어오는 AI 중심좌표의 이름을 부여.
-    // ⚠️ JJ가 벽을 옮겨 면이 바뀌면 이름이 어긋나거나 사라질 수 있음(참고용).
-    let name = null;
-    for (const rn of designRoomNames) {
-      if (pointInPoly([rn.cx, rn.cy], f)) { name = rn.name; break; }
+    const c = polyCentroid(f);
+    // 고정(잠긴) 방 매칭 우선: 면 중심이 잠긴 poly 안이면 그 이름·잠금 표시.
+    let name = null, locked = false;
+    for (let fi = 0; fi < designFixedRooms.length; fi++) {
+      if (pointInPoly(c, designFixedRooms[fi].poly)) {
+        name = designFixedRooms[fi].name; locked = true; fixedHit[fi] = true; break;
+      }
     }
-    designRooms.push({ poly: f, area_m2: +(ar / 1e6).toFixed(2), name,
-                       color: ROOM_PALETTE[ci % ROOM_PALETTE.length] });
+    // 잠긴 게 아니면 AI 방 이름 매칭(best effort): 면 안 AI 중심좌표 이름 부여.
+    // ⚠️ JJ가 벽을 옮겨 면이 바뀌면 이름이 어긋나거나 사라질 수 있음(참고용).
+    if (!locked) {
+      for (const rn of designRoomNames) {
+        if (pointInPoly([rn.cx, rn.cy], f)) { name = rn.name; break; }
+      }
+    }
+    designRooms.push({ poly: f, area_m2: +(ar / 1e6).toFixed(2), name, locked,
+                       color: locked ? _LOCK_COLOR : ROOM_PALETTE[ci % ROOM_PALETTE.length] });
     ci++;
+  }
+  // 스테일 lock reconcile: 해당 면이 사라진(undo 등) 고정 방은 자동 해제.
+  if (fixedHit.includes(false)) {
+    designFixedRooms = designFixedRooms.filter((_, fi) => fixedHit[fi]);
+    renderFixedList();
   }
 }
 
@@ -1832,29 +1892,163 @@ function renderDesignWalls() {
 }
 function renderDesignRooms() {
   for (const m of _designRoomMeshes) { designGroup.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); }
-  _designRoomMeshes = [];
-  for (const rm of designRooms) {
+  _designRoomMeshes = []; _designRoomTiles = [];
+  for (let i = 0; i < designRooms.length; i++) {
+    const rm = designRooms[i];
+    const selected = (i === selectedDesignFace);
     const shape = new THREE.Shape(rm.poly.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)));
     const tile = new THREE.Mesh(new THREE.ShapeGeometry(shape),
-      new THREE.MeshBasicMaterial({ color: rm.color, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+      new THREE.MeshBasicMaterial({ color: selected ? _FACE_SELECT_COLOR : rm.color,
+                                    transparent: true, opacity: selected ? 0.85 : (rm.locked ? 0.62 : 0.5),
+                                    side: THREE.DoubleSide }));
     tile.rotation.x = Math.PI / 2; tile.position.y = 0.02;
-    designGroup.add(tile); _designRoomMeshes.push(tile);
+    tile.userData.faceIdx = i;
+    designGroup.add(tile); _designRoomMeshes.push(tile); _designRoomTiles.push(tile);
     const c = polyCentroid(rm.poly);
-    const label = makeLabel(rm.name ? `${rm.name}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`);
+    const txt = rm.locked ? `🔒 ${rm.name || "고정"}\n${rm.area_m2}㎡`
+                          : (rm.name ? `${rm.name}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`);
+    const label = makeLabel(txt);
     label.position.set(c[0] / 1000, 0.6, c[1] / 1000);
     designGroup.add(label); _designRoomMeshes.push(label);
   }
 }
 
+// ── 고정 방(Fixed Room): 그리기→이름→잠금 ────────────────────────────────────
+// designWalls 중복 선분 제거 (재주입 전 정리). 좌표 반올림 후 양끝 정렬 키로 dedup.
+function dedupDesignWalls() {
+  const seen = new Set(), out = [];
+  for (const w of designWalls) {
+    const a = [Math.round(w.a[0]), Math.round(w.a[1])];
+    const b = [Math.round(w.b[0]), Math.round(w.b[1])];
+    if (a[0] === b[0] && a[1] === b[1]) continue;
+    const k = (a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]))
+      ? `${a}|${b}` : `${b}|${a}`;
+    if (seen.has(k)) continue;
+    seen.add(k); out.push({ a: a.slice(), b: b.slice() });
+  }
+  designWalls = out;
+}
+
+// 잠긴 방의 poly 변을 designWalls에 재주입 — clear에도 고정 방이 살아남게.
+function ensureLockedWalls() {
+  for (const fr of designFixedRooms) {
+    const p = fr.poly;
+    for (let i = 0; i < p.length; i++)
+      designWalls.push({ a: p[i].slice(), b: p[(i + 1) % p.length].slice() });
+  }
+  dedupDesignWalls();
+}
+
+// 고정 방 목록 사이드바 렌더 (항목별 🔓 해제)
+function renderFixedList() {
+  const box = document.getElementById("design-fix-list");
+  if (!box) return;
+  if (!designFixedRooms.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+  box.style.display = "block";
+  box.innerHTML = `<div style="font-size:11px; color:#9aa; margin:8px 0 4px;">🔒 고정 방 ${designFixedRooms.length}개</div>`;
+  designFixedRooms.forEach((fr, i) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex; align-items:center; justify-content:space-between; padding:4px 6px; background:#161a22; border-radius:6px; margin-bottom:4px;";
+    const nm = document.createElement("span"); nm.textContent = `🔒 ${fr.name}`;
+    const btn = document.createElement("button");
+    btn.textContent = "🔓 해제"; btn.className = "btn-secondary";
+    btn.style.cssText = "padding:4px 8px; border-radius:6px; font-size:11px; cursor:pointer;";
+    btn.addEventListener("click", () => unlockFixedRoom(i));
+    row.appendChild(nm); row.appendChild(btn); box.appendChild(row);
+  });
+}
+
+// 고정 모드 UI를 OFF 상태로 초기화 (DOM만 — designGroup 없을 때도 안전)
+function resetFixModeUI() {
+  designFixMode = false; selectedDesignFace = -1;
+  const btn = document.getElementById("btn-fix-mode");
+  if (btn) { btn.textContent = "🔒 고정 방 지정"; btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary"); }
+  const panel = document.getElementById("design-fix-panel");
+  if (panel) panel.style.display = "none";
+  const lb = document.getElementById("btn-lock-fixed");
+  if (lb) lb.disabled = true;
+  renderFixedList();
+}
+
+// 🔒 고정 방 지정 서브모드 토글
+function setFixMode(on) {
+  designFixMode = on;
+  if (on && drawStart) { endDrawPreview(); drawStart = null; designDrawing = false; _drawDownXY = null; }  // 진행중 선 취소
+  selectedDesignFace = -1;
+  const btn = document.getElementById("btn-fix-mode");
+  const panel = document.getElementById("design-fix-panel");
+  if (btn) {
+    btn.textContent = on ? "🔒 고정 방 지정 종료" : "🔒 고정 방 지정";
+    btn.classList.toggle("btn-primary", on);
+    btn.classList.toggle("btn-secondary", !on);
+  }
+  if (panel) panel.style.display = on ? "block" : "none";
+  document.getElementById("btn-lock-fixed").disabled = true;
+  renderFixedList();
+  renderDesignRooms();
+  showStatus(on ? "🔒 고정 방 지정 모드 — 닫힌 방을 클릭해 선택하세요." :
+                  "고정 방 지정 모드를 종료했습니다.", "info");
+}
+
+// 고정 모드에서 면 선택 (raycast 결과 faceIdx)
+function selectDesignFace(idx) {
+  selectedDesignFace = idx;
+  renderDesignRooms();
+  const lockBtn = document.getElementById("btn-lock-fixed");
+  if (idx < 0) { lockBtn.disabled = true; return; }
+  const rm = designRooms[idx];
+  // 이미 잠긴 방을 다시 선택하면 이름 보여주되 잠금 버튼은 비활성(해제는 목록에서)
+  lockBtn.disabled = !!rm.locked;
+  const pre = rm.name || "";
+  document.getElementById("design-fix-input").value = rm.locked ? "" : pre;
+  document.getElementById("design-fix-select").value =
+    (!rm.locked && ["현관","다용도실","발코니","팬트리","창고","계단실","보일러실","드레스룸"].includes(pre)) ? pre : "";
+  showStatus(rm.locked ? `이미 고정된 방(${rm.name})입니다. 해제는 목록에서.` :
+                         `면 선택됨 (${rm.area_m2}㎡) — 이름을 정해 잠그세요.`, "info");
+}
+
+// 선택한 면을 고정 방으로 잠금
+function lockSelectedFace() {
+  if (selectedDesignFace < 0 || !designRooms[selectedDesignFace]) {
+    showStatus("먼저 잠글 방(닫힌 면)을 클릭하세요.", "error"); return;
+  }
+  const rm = designRooms[selectedDesignFace];
+  if (rm.locked) { showStatus("이미 고정된 방입니다.", "info"); return; }
+  const name = document.getElementById("design-fix-input").value.trim();
+  if (!name) { showStatus("이름을 입력하세요 (예: 현관).", "error"); return; }
+  designFixedRooms.push({ name, poly: rm.poly.map(p => p.slice()) });
+  selectedDesignFace = -1;
+  document.getElementById("design-fix-input").value = "";
+  document.getElementById("design-fix-select").value = "";
+  document.getElementById("btn-lock-fixed").disabled = true;
+  recomputeDesignRooms();   // 잠금 매칭 반영
+  renderDesignWalls(); renderDesignRooms();
+  renderFixedList(); updateDesignActions();
+  showStatus(`🔒 "${name}" 고정됨 (${designFixedRooms.length}개). 그리던 것 지우기에도 보존됩니다.`, "ok");
+}
+
+// 고정 방 해제 (목록 🔓)
+function unlockFixedRoom(i) {
+  if (i < 0 || i >= designFixedRooms.length) return;
+  const nm = designFixedRooms[i].name;
+  designFixedRooms.splice(i, 1);
+  selectedDesignFace = -1;
+  recomputeDesignRooms();
+  renderDesignWalls(); renderDesignRooms();
+  renderFixedList(); updateDesignActions();
+  showStatus(`🔓 "${nm}" 고정을 해제했습니다.`, "ok");
+}
+
 // ── 진입/이탈/undo ─────────────────────────────────────────────────────────
 async function enterDesignMode(unit) {
-  let boundary, loadedWalls = [], loadedNames = [];
+  let boundary, loadedWalls = [], loadedNames = [], loadedFixed = [];
   const saved = unitDesigns[unit];
   if (saved) {
     // 저장된 설계 있으면 그 외곽·벽을 불러와 이어 편집 (백엔드 재요청 X — 일관성)
     boundary = saved.boundary_mm.map(p => p.slice());
     loadedWalls = saved.walls.map(w => ({ a: w.a.slice(), b: w.b.slice() }));
     loadedNames = (saved.roomNames || []).map(r => ({ name: r.name, cx: r.cx, cy: r.cy }));
+    loadedFixed = (saved.fixedRooms || []).map(r => ({ name: r.name, poly: r.poly.map(p => p.slice()) }));
   } else {
     // 첫 진입: 빈 외곽(봉투) 백엔드 요청
     const polys = parsedData.rooms.filter(r => r.unit === unit).map(r => r.polygon_mm);
@@ -1874,7 +2068,10 @@ async function enterDesignMode(unit) {
 
   designUnit = unit; designBoundary = boundary; designWalls = loadedWalls; designRooms = []; designHistory = [];
   designRoomNames = loadedNames;   // 저장본 이름 복원 (첫 진입은 빈 배열)
+  designFixedRooms = loadedFixed;  // 저장본 고정 방 복원
+  designFixMode = false; selectedDesignFace = -1;
   recomputeDesignRooms();   // 불러온 벽으로 방 복원 (없으면 빈 결과)
+  resetFixModeUI();         // 고정 모드 버튼/패널 초기화 + 목록 렌더 (DOM만)
 
   // 원본 레이어 숨김 (원본 데이터는 보존 — 나가면 복귀)
   roomTiles.forEach(t => t.visible = false);
@@ -1917,8 +2114,9 @@ function exitDesignMode() {
     designGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
     roomScene.remove(designGroup);
   }
-  designGroup = null; _designWallMeshes = []; _designRoomMeshes = [];
+  designGroup = null; _designWallMeshes = []; _designRoomMeshes = []; _designRoomTiles = [];
   designBoundary = null; designWalls = []; designRooms = []; designHistory = []; designRoomNames = [];
+  designFixedRooms = []; selectedDesignFace = -1; designFixMode = false;
   designUnit = null; drawStart = null; designDrawing = false;
   // 원본 레이어 복귀
   roomTiles.forEach(t => t.visible = true);
@@ -1935,13 +2133,16 @@ function undoDesignWall() {
   updateDesignActions();
   showStatus("↩️ 직전 벽을 되돌렸습니다.", "ok");
 }
-// "그리던 것 지우기" — 현재 작업만 빈 외곽으로 (저장본·To-Be는 안 건드림)
+// "그리던 것 지우기" — 현재 작업만 빈 외곽으로 (저장본·To-Be·고정 방은 보존)
 function clearDesignWalls() {
   if (!designWalls.length) return;
   designHistory = []; designWalls = []; designRooms = []; designRoomNames = [];
+  selectedDesignFace = -1;
+  ensureLockedWalls();   // 잠긴 방 poly 변 재주입 → 고정 방 보존
   recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
-  updateDesignActions();
-  showStatus("↺ 그리던 것을 지웠습니다 (저장본은 유지).", "ok");
+  renderFixedList(); updateDesignActions();
+  const kept = designFixedRooms.length;
+  showStatus(`↺ 그리던 것을 지웠습니다${kept ? ` (고정 방 ${kept}개 보존)` : ""}.`, "ok");
 }
 
 // "이 세대 원본으로 되돌리기" — 저장된 새 구조까지 삭제 + To-Be에서 제거
@@ -1949,8 +2150,9 @@ function revertDesignToOriginal() {
   const hadSaved = !!unitDesigns[designUnit];
   delete unitDesigns[designUnit];
   designHistory = []; designWalls = []; designRooms = []; designRoomNames = [];
+  designFixedRooms = []; selectedDesignFace = -1;
   recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
-  renderToBe();
+  renderFixedList(); renderToBe();
   updateDesignActions();
   showStatus(hadSaved ? `↩️ ${UNIT_LABELS[designUnit]} 저장 구조를 삭제하고 원본 상태로 되돌렸습니다.`
                       : "빈 외곽 상태입니다 (저장된 구조 없음).", "ok");
@@ -1965,6 +2167,7 @@ function saveDesign() {
     walls: designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })),
     rooms: designRooms.map(r => ({ poly: r.poly.map(p => p.slice()), area_m2: r.area_m2, color: r.color })),
     roomNames: designRoomNames.map(r => ({ name: r.name, cx: r.cx, cy: r.cy })),
+    fixedRooms: designFixedRooms.map(r => ({ name: r.name, poly: r.poly.map(p => p.slice()) })),
   };
   renderToBe();
   updateDesignActions();
@@ -2111,6 +2314,7 @@ function updateDesignActions() {
 function resetDesignUI() {
   designMode = false;
   exitDesignMode();
+  resetFixModeUI();   // 고정 모드 버튼/패널/목록 초기화
   const btn = document.getElementById("btn-design-mode");
   if (btn) { btn.textContent = "내부 설계 모드 시작"; btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary"); }
   ["design-unit-picker", "design-actions", "design-hint"].forEach(id => {
@@ -2163,6 +2367,12 @@ document.getElementById("btn-save-design").addEventListener("click", saveDesign)
 document.getElementById("btn-generate-layout").addEventListener("click", generateLayout);
 document.getElementById("btn-export-png").addEventListener("click", capture3dPng);
 document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPdf);
+// 🔒 고정 방
+document.getElementById("btn-fix-mode").addEventListener("click", () => setFixMode(!designFixMode));
+document.getElementById("btn-lock-fixed").addEventListener("click", lockSelectedFace);
+document.getElementById("design-fix-select").addEventListener("change", e => {
+  if (e.target.value) document.getElementById("design-fix-input").value = e.target.value;
+});
 // Ctrl+Z (설계 모드)
 window.addEventListener("keydown", e => {
   if (designMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {

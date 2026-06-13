@@ -471,6 +471,43 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         필수) 빌라 page3 A세대 침실2 욕실1: 방 외곽 안·**방 사이 빈틈 없음**·현관/거실/주방/침실/
         욕실/다용도실 라벨·**거실 통해 모든 공간 접근**·클릭-클릭 편집·Ctrl+Z 통째취소. **오피스텔로도
         1회**. 통과 전 미완료.
+- [x] **고정 방(Fixed Room) — JJ가 위치 아는 공간(현관 등)을 직접 그려 잠금**(AI 배치는 무수정,
+      다음 증분에서 이 고정 방을 받아 나머지만 채움 — 이번엔 데이터 구조·잠금 UI까지).
+      흐름: 클릭-클릭으로 닫힌 방 그림 → **🔒 고정 방 지정** 서브모드 토글 → 그 면 클릭(raycast)
+        선택 → 이름(드롭다운 현관/다용도실/발코니/팬트리/창고/계단실/보일러실/드레스룸 + 직접입력)
+        → **🔒 고정으로 잠금**. 여러 개 가능. 사이드바 "고정 방" 목록 + 항목별 🔓 해제.
+      구현: 전역 `designFixedRooms=[{name, poly(mm)}]`(designWalls/designRooms와 별도 레지스트리;
+        고정 방 벽은 designWalls에 그대로 있음). 서브모드 `designFixMode`(unitMode 패턴) — ON이면
+        mouseup 상태머신 **맨 앞 분기**에서 좌클릭=`_designRoomTiles` raycast 면 선택 후 return(벽
+        그리기 안 탐). ★토글 ON 시 **진행중 클릭-클릭 선 취소**(drawStart 비움). `renderDesignRooms`가
+        타일에 `userData.faceIdx` 부여 + `_designRoomTiles[]` 별도 보관. `recomputeDesignRooms`에
+        잠금 매칭(면 centroid가 fixed poly 안이면 `face.locked/face.name`, 기존 AI 이름 매칭과 같은
+        자리)+**스테일 lock reconcile**(해당 면 사라지면 자동 해제). 잠금 면=잠금색(`_LOCK_COLOR`
+        슬레이트)+라벨 `🔒 이름\n면적`, 선택 면=금색.
+      잠금 의미(**완전한 편집 차단 아님** — 거짓 보장 금지): ①이름+레지스트리 ②**clear("그리던 것
+        지우기")에서 보존**(`ensureLockedWalls`가 잠긴 poly 변을 designWalls에 재주입, 재주입 전
+        `dedupDesignWalls`) ③다음 증분 AI 핸드오프 데이터. **`undoDesignWall`은 literal 무수정** —
+        잠금 이전까지 undo로 밀면 그 면이 사라져 reconcile이 자동 해제(의도적, undo 단순 유지). ⚠️
+        **잠긴 방 위에 새 벽을 그어 면을 쪼개는 건 아직 못 막음**(가드는 다음 증분). 노이즈 외곽에선
+        손그림 방이 여러 면으로 쪼개져 한 고정 영역이 여러 잠금 면으로 보일 수 있음(영역 보존이 핵심).
+      저장/복원: `saveDesign`→`unitDesigns[unit].fixedRooms`, `enterDesignMode` saved 분기 복원,
+        `exitDesignMode`/`revertDesignToOriginal` 리셋·전체삭제. `resetFixModeUI`로 모드 버튼/패널 초기화.
+      **AI 핸드오프 payload(구조만, 호출은 다음 증분)**: `POST /api/generate-layout` body에
+        `fixed_rooms:[{name, poly:[[x,y]...]}]` 추가 예정 → 백엔드가 `사용가능 영역 = 외곽 −
+        ∪(fixed poly)`(shapely difference) 계산해 빈 영역만 AI에 주고 응답에 고정 방 합쳐 반환.
+        **이번 증분은 `generateLayout` 무수정**(designFixedRooms 구조만 완비, payload 미전송).
+      무수정 확인: 클릭-클릭/snapPoint/`undoDesignWall`/renderToBe/내보내기/**generateLayout**/
+        beforeunload/api 전부 안 건드림. 신규 헬퍼만 추가(ensureLockedWalls/dedupDesignWalls/
+        setFixMode/resetFixModeUI/selectDesignFace/lockSelectedFace/unlockFixedRoom/renderFixedList).
+      검증: ①(자동) `_verify_fixedroom.py`(빌라 page3 A세대, **실제 클릭**) — 닫힌 방 그림·진행중 선
+        찍고 토글 시 **취소 확인**·면 raycast 선택·이름"현관" 잠금(designFixedRooms=1·name·poly)·
+        잠금색·둘째 방 추가(=2)·**clear 후 보존(=2)**·🔓 해제(=1)·저장→종료→재진입 복원(다용도실)·
+        에러0. 회귀(_verify_clickdraw/_verify_genlayout/_verify_export) 전부 통과. ②(JJ 수동·필수)
+        실제 브라우저: 현관 그리기→면 클릭→이름→고정 잠금 ①잠금 시각(자물쇠/색) ②clear에도 남는지
+        ③🔓 해제 ④다용도실 1개 더 ⑤**저장→재진입 유지** ⑥(참고)undo로 잠금 이전 밀면 풀림.
+        **오피스텔로도 1회**. 통과 전 미완료.
+- [ ] **세대별 AI 구조 제안 — 고정 방 연결**(다음 증분): generate-layout에 `fixed_rooms` 전달 +
+      백엔드 `외곽−고정방` difference로 빈 영역만 AI 배치 → 고정 방 합쳐 반환. 잠긴 방 위 그리기 가드.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 
 
