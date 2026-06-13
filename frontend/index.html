@@ -355,6 +355,31 @@
       margin-top: 4px;
       line-height: 1.5;
     }
+
+    /* 세대 묶기 */
+    #btn-unit-mode { width: 100%; }
+    .unit-btns { display: flex; gap: 6px; }
+    .unit-btn {
+      flex: 1; padding: 8px 4px;
+      font-size: 11px; font-weight: 600;
+      border-radius: 6px; border: 1px solid #2a2a35;
+      background: #13131a; color: #888;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .unit-btn:hover { border-color: #3a3a45; color: #bbb; }
+    .unit-btn.active { color: #fff; }
+    .unit-btn[data-unit="A"].active      { background: #1e3a8a; border-color: #3b82f6; }
+    .unit-btn[data-unit="B"].active      { background: #14532d; border-color: #22c55e; }
+    .unit-btn[data-unit="C"].active      { background: #7c2d12; border-color: #f97316; }
+    .unit-btn[data-unit="common"].active { background: #374151; border-color: #9ca3af; }
+    .unit-counts {
+      display: none; margin-top: 10px;
+      font-size: 11px; line-height: 1.9;
+    }
+    .unit-counts .uc {
+      display: inline-block; margin-right: 10px;
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
@@ -461,6 +486,22 @@
       </div>
     </div>
 
+    <!-- 세대 묶기 -->
+    <div>
+      <div class="section-label">🏢 세대 묶기</div>
+      <button class="action-btn btn-secondary" id="btn-unit-mode" disabled>세대 묶기 모드 시작</button>
+      <div id="unit-picker" style="display:none; margin-top:10px;">
+        <div class="unit-btns">
+          <button class="unit-btn" data-unit="A">A세대</button>
+          <button class="unit-btn" data-unit="B">B세대</button>
+          <button class="unit-btn" data-unit="C">C세대</button>
+          <button class="unit-btn" data-unit="common">공용</button>
+        </div>
+        <div class="room-edit-hint">세대를 고른 뒤 3D에서 방들을 클릭해 묶으세요. 같은 세대 재클릭 = 해제.</div>
+      </div>
+      <div class="unit-counts" id="unit-counts"></div>
+    </div>
+
     <!-- 방 이름 수정 (방 클릭 시 표시) -->
     <div id="room-edit-section" style="display:none;">
       <div class="section-label" style="margin-bottom:8px;">방 이름 수정</div>
@@ -531,6 +572,13 @@ let roomScene = null;      // renderParsed 씬
 let roomCamera = null;     // renderParsed 카메라
 let selectionRing = null;  // 선택된 방 하이라이트 링
 let selectedRoomIdx = null;
+
+// 세대 묶기 상태
+let unitMode = false;        // 세대 묶기 모드 on/off
+let currentUnit = "A";       // 지정 모드에서 현재 선택된 세대
+let unitHighlight = null;    // 세대 외곽 하이라이트 (LineSegments)
+const UNIT_COLORS = { A: 0x3b82f6, B: 0x22c55e, C: 0xf97316, common: 0x9ca3af };
+const UNIT_LABELS = { A: "A세대", B: "B세대", C: "C세대", common: "공용" };
 
 function isPdf(file) {
   return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
@@ -673,6 +721,8 @@ async function parsePdf() {
 
     document.getElementById("advice-input").disabled = false;
     document.getElementById("btn-advice").disabled = false;
+    document.getElementById("btn-unit-mode").disabled = false;
+    updateUnitCounts();
 
     renderParsed("panel-asis", "ph-asis", data, "asis");
     showStatus(`✅ 파싱 완료 — 방 ${data.rooms.length}개(이름 ${named}), 외곽 ${data.outline_area_m2}m² · 벽 표현 ${data.wall_repr}`, "ok");
@@ -837,6 +887,7 @@ function renderParsed(panelId, phId, data, key) {
 
   // 방 편집 상태 초기화
   roomTiles = []; roomLabels = []; selectionRing = null; selectedRoomIdx = null;
+  unitHighlight = null;
   document.getElementById("room-edit-section").style.display = "none";
 
   const W = panel.clientWidth, H = panel.clientHeight;
@@ -874,15 +925,18 @@ function renderParsed(panelId, phId, data, key) {
 
   // 2) 방 구획 — 색 바닥 타일 + 경계선 + 이름 라벨
   rooms.forEach((rm, i) => {
-    const col = ROOM_PALETTE[i % ROOM_PALETTE.length];
-    const tileMat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+    const col = ROOM_PALETTE[i % ROOM_PALETTE.length];        // 개별 방 팔레트(경계선용)
+    // 세대 지정된 방은 세대 색으로 칠하고 더 불투명하게 (위에서 세대 구분)
+    const hasUnit = rm.unit && UNIT_COLORS[rm.unit] !== undefined;
+    const baseCol = hasUnit ? UNIT_COLORS[rm.unit] : col;
+    const tileMat = new THREE.MeshBasicMaterial({ color: baseCol, transparent: true, opacity: hasUnit ? 0.72 : 0.55, side: THREE.DoubleSide });
     const tile = new THREE.Mesh(
       new THREE.ShapeGeometry(new THREE.Shape(toV2(rm.polygon_mm))),
       tileMat);
     tile.rotation.x = Math.PI / 2;
     tile.position.y = 0.0;
     tile.userData.roomIdx = i;
-    tile.userData.origColor = col;   // 선택 해제 시 복원용
+    tile.userData.origColor = baseCol;   // 선택 해제 시 복원용(세대색 우선)
     scene.add(tile);
     roomTiles.push(tile);
 
@@ -948,8 +1002,12 @@ function renderParsed(panelId, phId, data, key) {
       const hits = ray.intersectObjects(roomTiles);
       if (hits.length) {
         const idx = hits[0].object.userData.roomIdx;
-        selectRoom(idx === selectedRoomIdx ? null : idx); // 재클릭 = 해제
-      } else {
+        if (unitMode) {
+          assignUnit(idx);                                 // 세대 묶기 모드: 지정/해제
+        } else {
+          selectRoom(idx === selectedRoomIdx ? null : idx); // 일반 모드: 재클릭 = 해제
+        }
+      } else if (!unitMode) {
         selectRoom(null);
       }
     });
@@ -1167,16 +1225,18 @@ function autoLayoutRooms(ptsMm) {
 const _KNOWN_NAMES = ["거실","안방","침실","욕실","주방","현관","발코니","파우더룸","다용도실","테라스"];
 
 function selectRoom(idx) {
-  // 이전 선택 해제: 타일 색·투명도 원복
+  // 이전 선택 해제: 타일 색·투명도 원복 (세대 지정 방이면 세대색·0.72로)
   if (selectedRoomIdx !== null && roomTiles[selectedRoomIdx]) {
     const t = roomTiles[selectedRoomIdx];
+    const prev = parsedData.rooms[selectedRoomIdx];
     t.material.color.setHex(t.userData.origColor);
-    t.material.opacity = 0.55;
+    t.material.opacity = (prev && prev.unit) ? 0.72 : 0.55;
   }
   if (selectionRing && roomScene) {
     roomScene.remove(selectionRing);
     selectionRing = null;
   }
+  clearUnitHighlight();
 
   selectedRoomIdx = idx;
   if (idx === null) {
@@ -1209,13 +1269,123 @@ function selectRoom(idx) {
   selectionRing.renderOrder = 999;
   roomScene.add(selectionRing);
 
+  // 하이라이트 ③ 그 방이 속한 세대 전체 외곽선을 세대 색으로 (일반 모드 요구사항)
+  if (rm.unit && UNIT_COLORS[rm.unit] !== undefined) highlightUnit(rm.unit);
+
   // 편집 패널 채우기
   const nm = (rm.names && rm.names.length) ? rm.names.join("·") : "";
-  document.getElementById("selected-room-label").textContent = nm || `#${rm.id} (이름 없음)`;
+  const unitTxt = rm.unit ? ` · ${UNIT_LABELS[rm.unit]}` : "";
+  document.getElementById("selected-room-label").textContent = (nm || `#${rm.id} (이름 없음)`) + unitTxt;
   document.getElementById("room-name-input").value = nm;
   document.getElementById("room-name-select").value = _KNOWN_NAMES.includes(nm) ? nm : "";
   document.getElementById("room-edit-section").style.display = "block";
 }
+
+// ── 세대 묶기 ──────────────────────────────────────────────────────────────
+function roomBaseColor(idx) {
+  const rm = parsedData.rooms[idx];
+  if (rm.unit && UNIT_COLORS[rm.unit] !== undefined) return UNIT_COLORS[rm.unit];
+  return ROOM_PALETTE[idx % ROOM_PALETTE.length];
+}
+
+// 방 타일을 현재 세대 소속에 맞는 기본색으로 재적용 (선택 중이 아니면 즉시 반영)
+function applyRoomBaseColor(idx) {
+  const tile = roomTiles[idx];
+  if (!tile) return;
+  const col = roomBaseColor(idx);
+  tile.userData.origColor = col;
+  if (selectedRoomIdx !== idx) {
+    tile.material.color.setHex(col);
+    tile.material.opacity = parsedData.rooms[idx].unit ? 0.72 : 0.55;
+  }
+}
+
+// 방을 현재 세대에 지정 / 같은 세대면 해제
+function assignUnit(idx) {
+  if (!parsedData) return;
+  const rm = parsedData.rooms[idx];
+  if (rm.unit === currentUnit) {
+    rm.unit = null;
+    showStatus(`방 #${rm.id} 세대 지정을 해제했습니다.`, "ok");
+  } else {
+    rm.unit = currentUnit;
+    showStatus(`방 #${rm.id} → ${UNIT_LABELS[currentUnit]}에 지정했습니다.`, "ok");
+  }
+  applyRoomBaseColor(idx);
+  updateUnitCounts();
+}
+
+function clearUnitHighlight() {
+  if (unitHighlight && roomScene) { roomScene.remove(unitHighlight); unitHighlight = null; }
+}
+
+// 같은 세대 방들의 바닥링+상단링을 세대 색으로 — 벽 너머도 보이게(depthTest off)
+function highlightUnit(unit) {
+  clearUnitHighlight();
+  if (!roomScene) return;
+  const col = UNIT_COLORS[unit];
+  const segs = [];
+  const hi = 2.8;
+  parsedData.rooms.forEach(rm => {
+    if (rm.unit !== unit) return;
+    const poly = [...rm.polygon_mm, rm.polygon_mm[0]];
+    for (let k = 0; k < poly.length - 1; k++) {
+      const a = poly[k], b = poly[k + 1];
+      segs.push(a[0]/1000, 0.04, a[1]/1000,  b[0]/1000, 0.04, b[1]/1000);  // 바닥 링
+      segs.push(a[0]/1000, hi,   a[1]/1000,  b[0]/1000, hi,   b[1]/1000);  // 상단 링
+    }
+  });
+  if (!segs.length) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(segs, 3));
+  unitHighlight = new THREE.LineSegments(geo,
+    new THREE.LineBasicMaterial({ color: col, transparent: true, depthTest: false, opacity: 0.95 }));
+  unitHighlight.renderOrder = 998;   // 금색 선택(999)보다 아래
+  roomScene.add(unitHighlight);
+}
+
+function setCurrentUnit(u) {
+  currentUnit = u;
+  document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === u));
+}
+
+function updateUnitCounts() {
+  const box = document.getElementById("unit-counts");
+  if (!parsedData) { box.style.display = "none"; return; }
+  const c = { A: 0, B: 0, C: 0, common: 0 };
+  let unassigned = 0;
+  parsedData.rooms.forEach(r => {
+    if (r.unit && c[r.unit] !== undefined) c[r.unit]++; else unassigned++;
+  });
+  const parts = [];
+  for (const u of ["A", "B", "C", "common"]) {
+    if (c[u]) parts.push(`<span class="uc" style="color:#${UNIT_COLORS[u].toString(16).padStart(6,"0")}">${UNIT_LABELS[u]} ${c[u]}칸</span>`);
+  }
+  parts.push(`<span class="uc" style="color:#666">미지정 ${unassigned}칸</span>`);
+  box.innerHTML = parts.join("");
+  box.style.display = "block";
+}
+
+// 모드 토글 + 세대 선택 버튼
+document.getElementById("btn-unit-mode").addEventListener("click", () => {
+  unitMode = !unitMode;
+  const btn = document.getElementById("btn-unit-mode");
+  document.getElementById("unit-picker").style.display = unitMode ? "block" : "none";
+  if (unitMode) {
+    btn.textContent = "세대 묶기 모드 종료";
+    btn.classList.remove("btn-secondary"); btn.classList.add("btn-primary");
+    selectRoom(null);                 // 기존 선택/이름수정 패널 정리 (충돌 방지)
+    setCurrentUnit(currentUnit);
+    showStatus("세대 묶기 모드 — 세대를 고르고 3D에서 방들을 클릭하세요.", "info");
+  } else {
+    btn.textContent = "세대 묶기 모드 시작";
+    btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary");
+    showStatus("세대 묶기 모드를 종료했습니다.", "ok");
+  }
+});
+document.querySelectorAll(".unit-btn").forEach(b => {
+  b.addEventListener("click", () => setCurrentUnit(b.dataset.unit));
+});
 
 function applyRoomName() {
   if (selectedRoomIdx === null || !parsedData) return;
@@ -1275,6 +1445,7 @@ async function requestAdvice() {
   // 컨텍스트용으로 방 데이터(이름·면적·위치) + 외곽 전송
   const rooms = parsedData.rooms.map(r => ({
     id: r.id, names: r.names || [], area_m2: r.area_m2, polygon_mm: r.polygon_mm,
+    unit: r.unit || null,
   }));
 
   const orientation = document.getElementById("orientation-select").value;
