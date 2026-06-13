@@ -544,8 +544,13 @@
         <div id="edit-areas">—</div>
         <div class="edit-hint">접한 방 면적이 실시간 갱신됩니다.</div>
       </div>
+      <div id="edit-actions" style="display:none; gap:6px; margin-top:10px;">
+        <button class="btn-secondary" id="btn-undo-edit" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>↩️ 되돌리기</button>
+        <button class="btn-secondary" id="btn-reset-edit" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>전체 초기화</button>
+      </div>
       <div class="edit-hint" id="edit-hint-main" style="display:none;">
-        주황색으로 표시된 벽만 이동할 수 있습니다(직선 내벽). 비축정렬·외벽은 v1 미지원.
+        주황색으로 표시된 벽만 이동할 수 있습니다(직선 내벽). 비축정렬·외벽은 v1 미지원.<br>
+        Ctrl+Z로 되돌리기.
       </div>
     </div>
 
@@ -640,11 +645,15 @@ let wallHighlight = null;      // 선택 벽 에지 케이지
 let wallDragging = false;      // 벽 드래그 중
 let wallJustDragged = false;   // 드래그 직후 클릭 선택 무시용
 let dragLastGround = null;     // 직전 바닥 교차점 (Vector3, m)
+let editHistory = [];          // undo 스택 (각 항목 = 방 폴리곤 스냅샷)
+let editOriginal = null;       // 편집 시작 시점 원본 스냅샷 (전체 초기화용)
+let dragStartSnapshot = null;  // 드래그 시작 직전 스냅샷 (이동 확정 시 히스토리에 push)
 const EDIT_WALL_COLOR = 0xff8c00;   // 편집 가능 벽 피커 색(주황)
 const EDIT_WALL_SEL = 0xffd24a;     // 선택된 벽 색
-// 벽 클러스터링/페어링 상수 (빌라 page3 실측으로 결정 — tol 80mm)
-const _WALL_TOL = 80, _WALL_THICK_MIN = 90, _WALL_THICK_MAX = 350;
-const _WALL_MIN_OVERLAP = 700, _WALL_MIN_MEMB = 3, _WALL_MIN_AREA = 1.0e6; // mm²
+// 벽 클러스터링/페어링 상수 (빌라 page3 A세대 실측으로 완화 — tol 80mm)
+// 세대 스코핑 덕에 완화해도 유령 벽 안 생김. 완화 전(700/3): A세대 5개 → 완화 후(300/2): 8개
+const _WALL_TOL = 80, _WALL_THICK_MIN = 70, _WALL_THICK_MAX = 400;
+const _WALL_MIN_OVERLAP = 300, _WALL_MIN_MEMB = 2, _WALL_MIN_AREA = 1.0e6; // mm²
 
 function isPdf(file) {
   return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
@@ -1070,6 +1079,7 @@ function renderParsed(panelId, phId, data, key) {
         if (id !== selectedWallId) selectWall(id);
         wallDragging = true; wallJustDragged = false;
         dragLastGround = groundPoint(e);
+        dragStartSnapshot = snapshotRooms();   // 드래그 시작 직전 상태 보관 (undo용)
         e.stopImmediatePropagation(); e.preventDefault();
       }
     }, true);
@@ -1705,27 +1715,67 @@ function showEditAreas(roomIdxs) {
 }
 
 function commitWallMove() {
-  wallJustDragged = false;
   if (selectedWallId === null) return;
   const aff = [...new Set(wallModel[selectedWallId].members.map(m => m.r))];
-  aff.forEach(refreshLabel);
+  aff.forEach(refreshLabel);   // 라벨/면적 확정
+  showEditAreas(aff);
   showStatus("✅ 벽 이동 완료 — 접한 방 면적 갱신.", "ok");
-  // 좌표가 바뀌었으니 모델/피커 재구성(선택 세대 범위 유지)
+  // ★ 모델/피커를 재구성하지 않는다 (재클러스터링이 그 벽을 떨어뜨려 피커가 사라지던 버그).
+  //    member는 (방idx·정점idx) 참조라 좌표만 바뀌어도 그대로 유효 → 피커가 벽을 계속 따라감.
+  //    선택도 유지해 같은 벽을 이어서 드래그 가능.
+}
+
+// ── Undo / 전체 초기화 ──────────────────────────────────────────────────────
+function snapshotRooms() {
+  // 모든 방 폴리곤 깊은 복사 (정점 수는 안 변하므로 member 참조 유지됨)
+  return parsedData.rooms.map(r => r.polygon_mm.map(p => p.slice()));
+}
+
+function restoreSnapshot(snap) {
+  snap.forEach((poly, i) => { parsedData.rooms[i].polygon_mm = poly.map(p => p.slice()); });
+  parsedData.rooms.forEach((rm, i) => { setTileGeometry(i); setRingGeometry(i); refreshLabel(i); });
+  rebuildWallExtrude();
+  // 좌표가 원복됐으니 모델/피커 재구성 (드래그 중이 아니라 안전)
   buildWallModel(editUnit);
   createWallPickers();
   selectWall(null);
+  updateUnitCounts();
+}
+
+function undoWallMove() {
+  if (!editHistory.length) { showStatus("되돌릴 편집이 없습니다.", "info"); return; }
+  restoreSnapshot(editHistory.pop());
+  updateEditActions();
+  showStatus("↩️ 직전 벽 이동을 되돌렸습니다.", "ok");
+}
+
+function resetAllEdits() {
+  if (!editOriginal) return;
+  restoreSnapshot(editOriginal.map(poly => poly.map(p => p.slice())));
+  editHistory = [];
+  updateEditActions();
+  showStatus("↺ 편집 전 원본으로 전체 초기화했습니다.", "ok");
+}
+
+function updateEditActions() {
+  const wrap = document.getElementById("edit-actions");
+  wrap.style.display = editMode ? "flex" : "none";
+  document.getElementById("btn-undo-edit").disabled = !editHistory.length;
+  document.getElementById("btn-reset-edit").disabled = !editHistory.length;
 }
 
 function resetEditUI() {
   editMode = false; editUnit = null;
   destroyWallPickers();
   selectedWallId = null; wallDragging = false;
+  editHistory = []; editOriginal = null; dragStartSnapshot = null;
   const btn = document.getElementById("btn-edit-mode");
   btn.textContent = "벽 이동 모드 시작";
   btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary");
   document.getElementById("edit-info").style.display = "none";
   document.getElementById("edit-hint-main").style.display = "none";
   document.getElementById("edit-unit-picker").style.display = "none";
+  document.getElementById("edit-actions").style.display = "none";
 }
 
 // 지정된 세대 목록을 받아 "편집할 세대" 버튼 활성/비활성
@@ -1765,11 +1815,14 @@ function setEditMode(on) {
       ub.classList.remove("btn-primary"); ub.classList.add("btn-secondary");
     }
     selectRoom(null);
+    editOriginal = snapshotRooms();   // 편집 시작 시점 원본 (전체 초기화 기준)
+    editHistory = [];
     btn.textContent = "벽 이동 모드 종료";
     btn.classList.remove("btn-secondary"); btn.classList.add("btn-primary");
     document.getElementById("edit-hint-main").style.display = "block";
     document.getElementById("edit-unit-picker").style.display = "block";
     buildEditUnitButtons(assigned);
+    updateEditActions();
     // 편집할 세대 자동 선택 (직전 currentUnit이 지정돼 있으면 그것, 아니면 첫 세대)
     selectEditUnit(assigned.includes(currentUnit) ? currentUnit : assigned[0]);
   } else {
@@ -1795,9 +1848,26 @@ window.addEventListener("mousemove", e => {
 window.addEventListener("mouseup", () => {
   if (!wallDragging) return;
   wallDragging = false;
-  if (wallJustDragged) commitWallMove();  // 실제 이동했을 때만 확정 (단순 클릭=선택 유지)
+  if (wallJustDragged) {                   // 실제 이동했을 때만 확정 + 히스토리 push
+    if (dragStartSnapshot) {
+      editHistory.push(dragStartSnapshot);
+      if (editHistory.length > 50) editHistory.shift();
+      updateEditActions();
+    }
+    commitWallMove();
+  }
+  dragStartSnapshot = null;
   wallJustDragged = false;
 });
+
+// Ctrl+Z 되돌리기 (편집 모드에서만)
+window.addEventListener("keydown", e => {
+  if (editMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault(); undoWallMove();
+  }
+});
+document.getElementById("btn-undo-edit").addEventListener("click", undoWallMove);
+document.getElementById("btn-reset-edit").addEventListener("click", resetAllEdits);
 
 function applyRoomName() {
   if (selectedRoomIdx === null || !parsedData) return;
