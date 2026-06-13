@@ -408,9 +408,11 @@
       </select>
       <input type="text" id="room-name-input" placeholder="또는 직접 입력..." style="margin-top:6px;">
       <div class="room-edit-hint">드롭다운 선택 또는 직접 입력 후 적용</div>
-      <div style="display:flex; gap:6px; margin-top:8px;">
+      <div style="display:flex; gap:6px; margin-top:8px; align-items:stretch;">
         <button class="action-btn btn-primary" id="btn-apply-room-name" style="flex:1; padding:9px;">적용</button>
-        <button class="action-btn btn-secondary" id="btn-cancel-room-edit" style="flex:0 0 auto; padding:9px 14px;">✕</button>
+        <button class="btn-secondary" id="btn-cancel-room-edit"
+                style="flex:0 0 30px; width:30px; padding:0; border-radius:8px; font-size:12px; cursor:pointer; line-height:1;"
+                title="선택 해제">✕</button>
       </div>
     </div>
 
@@ -802,6 +804,7 @@ function renderParsed(panelId, phId, data, key) {
     tile.rotation.x = Math.PI / 2;
     tile.position.y = 0.0;
     tile.userData.roomIdx = i;
+    tile.userData.origColor = col;   // 선택 해제 시 복원용
     scene.add(tile);
     roomTiles.push(tile);
 
@@ -1086,9 +1089,11 @@ function autoLayoutRooms(ptsMm) {
 const _KNOWN_NAMES = ["거실","안방","침실","욕실","주방","현관","발코니","파우더룸","다용도실","테라스"];
 
 function selectRoom(idx) {
-  // 이전 선택 해제
+  // 이전 선택 해제: 타일 색·투명도 원복
   if (selectedRoomIdx !== null && roomTiles[selectedRoomIdx]) {
-    roomTiles[selectedRoomIdx].material.opacity = 0.55;
+    const t = roomTiles[selectedRoomIdx];
+    t.material.color.setHex(t.userData.origColor);
+    t.material.opacity = 0.55;
   }
   if (selectionRing && roomScene) {
     roomScene.remove(selectionRing);
@@ -1101,14 +1106,29 @@ function selectRoom(idx) {
     return;
   }
 
-  // 하이라이트: 투명도 올리기 + 금색 테두리
-  roomTiles[idx].material.opacity = 0.88;
+  // 하이라이트 ① 선택 방 바닥을 금색으로 칠함 (위에서 확실히 구분)
+  const tile = roomTiles[idx];
+  tile.material.color.setHex(0xffd700);
+  tile.material.opacity = 0.92;
+
+  // 하이라이트 ② 금색 외곽 윤곽을 바닥~벽상단을 잇는 "케이지"로 — depthTest 끄고
+  //              renderOrder 높여 벽 너머에서도 항상 보이게
   const rm = parsedData.rooms[idx];
-  const ringPts = [...rm.polygon_mm, rm.polygon_mm[0]].map(p =>
-    new THREE.Vector3(p[0] / 1000, 0.03, p[1] / 1000));
-  selectionRing = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(ringPts),
-    new THREE.LineBasicMaterial({ color: 0xffd700 }));
+  const ringMat = new THREE.LineBasicMaterial({ color: 0xffd700, transparent: true, depthTest: false });
+  const segs = [];
+  const ringPoly = [...rm.polygon_mm, rm.polygon_mm[0]];
+  const hi = 2.8;   // 벽 높이
+  // 바닥 링
+  for (let k = 0; k < ringPoly.length - 1; k++) {
+    const a = ringPoly[k], b = ringPoly[k + 1];
+    segs.push(a[0]/1000, 0.05, a[1]/1000,  b[0]/1000, 0.05, b[1]/1000);   // 바닥 모서리
+    segs.push(a[0]/1000, hi,   a[1]/1000,  b[0]/1000, hi,   b[1]/1000);   // 상단 모서리
+    segs.push(a[0]/1000, 0.05, a[1]/1000,  a[0]/1000, hi,   a[1]/1000);   // 수직 기둥
+  }
+  const ringGeo = new THREE.BufferGeometry();
+  ringGeo.setAttribute("position", new THREE.Float32BufferAttribute(segs, 3));
+  selectionRing = new THREE.LineSegments(ringGeo, ringMat);
+  selectionRing.renderOrder = 999;
   roomScene.add(selectionRing);
 
   // 편집 패널 채우기
@@ -1143,6 +1163,7 @@ function applyRoomName() {
   document.getElementById("room-name-select").value = _KNOWN_NAMES.includes(newName) ? newName : "";
   const named = parsedData.rooms.filter(r => r.names && r.names.length).length;
   document.getElementById("info-conf").textContent = `${parsedData.rooms.length} / ${named}`;
+  showStatus(`✅ 방 이름을 '${newName}'(으)로 변경했습니다.`, "ok");
 }
 
 document.getElementById("room-name-select").addEventListener("change", e => {
