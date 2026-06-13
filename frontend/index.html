@@ -274,6 +274,34 @@
       line-height: 1.6;
       pointer-events: none;
     }
+
+    /* 방 이름 수정 패널 */
+    #room-edit-section {
+      background: #1a1a22;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    #room-edit-section select,
+    #room-edit-section input[type="text"] {
+      width: 100%;
+      background: #13131a;
+      border: 1px solid #2a2a35;
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: #ddd;
+      font-size: 12px;
+      outline: none;
+    }
+    #room-edit-section select:focus,
+    #room-edit-section input[type="text"]:focus { border-color: #1a6cf5; }
+    #room-edit-section select option { background: #13131a; }
+    .room-edit-hint {
+      font-size: 10px;
+      color: #555;
+      margin-top: 4px;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
@@ -358,6 +386,34 @@
       </div>
     </div>
 
+    <!-- 방 이름 수정 (방 클릭 시 표시) -->
+    <div id="room-edit-section" style="display:none;">
+      <div class="section-label" style="margin-bottom:8px;">방 이름 수정</div>
+      <div class="info-row" style="margin-bottom:10px;">
+        <span class="info-label">선택된 방</span>
+        <span class="info-value" id="selected-room-label">—</span>
+      </div>
+      <select id="room-name-select">
+        <option value="">— 직접 입력 —</option>
+        <option value="거실">거실</option>
+        <option value="안방">안방</option>
+        <option value="침실">침실</option>
+        <option value="욕실">욕실</option>
+        <option value="주방">주방</option>
+        <option value="현관">현관</option>
+        <option value="발코니">발코니</option>
+        <option value="파우더룸">파우더룸</option>
+        <option value="다용도실">다용도실</option>
+        <option value="테라스">테라스</option>
+      </select>
+      <input type="text" id="room-name-input" placeholder="또는 직접 입력..." style="margin-top:6px;">
+      <div class="room-edit-hint">드롭다운 선택 또는 직접 입력 후 적용</div>
+      <div style="display:flex; gap:6px; margin-top:8px;">
+        <button class="action-btn btn-primary" id="btn-apply-room-name" style="flex:1; padding:9px;">적용</button>
+        <button class="action-btn btn-secondary" id="btn-cancel-room-edit" style="flex:0 0 auto; padding:9px 14px;">✕</button>
+      </div>
+    </div>
+
   </div>
 
   <!-- ── 3D 뷰어 ── -->
@@ -368,7 +424,7 @@
         <div class="big-icon">🏠</div>
         <p>도면을 업로드하면<br>현황 3D가 표시됩니다</p>
       </div>
-      <div class="viewer-hint">드래그: 회전 · 휠: 줌 · 우클릭: 이동</div>
+      <div class="viewer-hint">드래그: 회전 · 휠: 줌 · 우클릭: 이동 · 클릭: 방 선택</div>
     </div>
     <div class="viewer-panel" id="panel-tobe">
       <div class="viewer-label">To-Be · 재설계</div>
@@ -390,6 +446,14 @@ let areaM2 = null;
 let renderers = {};
 let parsedData = null;   // 벡터 PDF 파싱 결과
 let lastPdfFile = null;  // 페이지 변경 시 재파싱용
+
+// 방 이름 수정 상태
+let roomTiles = [];        // raycasting 대상 타일 메시
+let roomLabels = [];       // 이름 라벨 스프라이트 (갱신용)
+let roomScene = null;      // renderParsed 씬
+let roomCamera = null;     // renderParsed 카메라
+let selectionRing = null;  // 선택된 방 하이라이트 링
+let selectedRoomIdx = null;
 
 function isPdf(file) {
   return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
@@ -691,6 +755,10 @@ function renderParsed(panelId, phId, data, key) {
     if (old) old.remove();
   }
 
+  // 방 편집 상태 초기화
+  roomTiles = []; roomLabels = []; selectionRing = null; selectedRoomIdx = null;
+  document.getElementById("room-edit-section").style.display = "none";
+
   const W = panel.clientWidth, H = panel.clientHeight;
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setSize(W, H);
@@ -702,6 +770,7 @@ function renderParsed(panelId, phId, data, key) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0f0f13);
   const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 2000);
+  if (key === "asis") { roomScene = scene; roomCamera = camera; }
 
   const outline = data.building_outline_mm;
   const rooms   = data.rooms || [];
@@ -726,12 +795,15 @@ function renderParsed(panelId, phId, data, key) {
   // 2) 방 구획 — 색 바닥 타일 + 경계선 + 이름 라벨
   rooms.forEach((rm, i) => {
     const col = ROOM_PALETTE[i % ROOM_PALETTE.length];
+    const tileMat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
     const tile = new THREE.Mesh(
       new THREE.ShapeGeometry(new THREE.Shape(toV2(rm.polygon_mm))),
-      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.55, side: THREE.DoubleSide }));
+      tileMat);
     tile.rotation.x = Math.PI / 2;
     tile.position.y = 0.0;
+    tile.userData.roomIdx = i;
     scene.add(tile);
+    roomTiles.push(tile);
 
     const ring = [...rm.polygon_mm, rm.polygon_mm[0]].map(p => new THREE.Vector3(p[0] / 1000, 0.015, p[1] / 1000));
     scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring),
@@ -743,6 +815,7 @@ function renderParsed(panelId, phId, data, key) {
     const label = makeLabel(txt);
     label.position.set(c[0] / 1000, 1.4, c[1] / 1000);
     scene.add(label);
+    roomLabels.push(label);
   });
 
   // 3) 벽 (구조만) = 외곽 − 방(구멍) 압출 → 가구/설비 자연 제외
@@ -773,6 +846,33 @@ function renderParsed(panelId, phId, data, key) {
   scene.add(grid);
 
   attachOrbit(renderer, camera, cx, cz, maxDist);
+
+  // 방 클릭 선택 — 드래그(5px 초과 이동)와 구분
+  if (key === "asis") {
+    let mdPos = null;
+    renderer.domElement.addEventListener("mousedown", e => {
+      mdPos = { x: e.clientX, y: e.clientY };
+    });
+    renderer.domElement.addEventListener("mouseup", e => {
+      if (!mdPos) return;
+      const dx = e.clientX - mdPos.x, dy = e.clientY - mdPos.y;
+      mdPos = null;
+      if (dx * dx + dy * dy > 25) return; // 드래그 → 무시
+      const rect = renderer.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(mouse, camera);
+      const hits = ray.intersectObjects(roomTiles);
+      if (hits.length) {
+        const idx = hits[0].object.userData.roomIdx;
+        selectRoom(idx === selectedRoomIdx ? null : idx); // 재클릭 = 해제
+      } else {
+        selectRoom(null);
+      }
+    });
+  }
 
   (function animate() {
     requestAnimationFrame(animate);
@@ -981,6 +1081,78 @@ function autoLayoutRooms(ptsMm) {
     { name:"공용욕실", polygon_mm: rect(mx-W*0.35, my+H*0.3, mx,          maxY-H*0.05), has_window:false },
   ];
 }
+
+// ── 방 이름 수정 ──────────────────────────────────────────────────────────
+const _KNOWN_NAMES = ["거실","안방","침실","욕실","주방","현관","발코니","파우더룸","다용도실","테라스"];
+
+function selectRoom(idx) {
+  // 이전 선택 해제
+  if (selectedRoomIdx !== null && roomTiles[selectedRoomIdx]) {
+    roomTiles[selectedRoomIdx].material.opacity = 0.55;
+  }
+  if (selectionRing && roomScene) {
+    roomScene.remove(selectionRing);
+    selectionRing = null;
+  }
+
+  selectedRoomIdx = idx;
+  if (idx === null) {
+    document.getElementById("room-edit-section").style.display = "none";
+    return;
+  }
+
+  // 하이라이트: 투명도 올리기 + 금색 테두리
+  roomTiles[idx].material.opacity = 0.88;
+  const rm = parsedData.rooms[idx];
+  const ringPts = [...rm.polygon_mm, rm.polygon_mm[0]].map(p =>
+    new THREE.Vector3(p[0] / 1000, 0.03, p[1] / 1000));
+  selectionRing = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(ringPts),
+    new THREE.LineBasicMaterial({ color: 0xffd700 }));
+  roomScene.add(selectionRing);
+
+  // 편집 패널 채우기
+  const nm = (rm.names && rm.names.length) ? rm.names.join("·") : "";
+  document.getElementById("selected-room-label").textContent = nm || `#${rm.id} (이름 없음)`;
+  document.getElementById("room-name-input").value = nm;
+  document.getElementById("room-name-select").value = _KNOWN_NAMES.includes(nm) ? nm : "";
+  document.getElementById("room-edit-section").style.display = "block";
+}
+
+function applyRoomName() {
+  if (selectedRoomIdx === null || !parsedData) return;
+  const newName = document.getElementById("room-name-input").value.trim();
+  if (!newName) return;
+
+  // parsedData 업데이트
+  const rm = parsedData.rooms[selectedRoomIdx];
+  rm.names = [newName];
+
+  // 기존 라벨 제거 후 새 라벨 추가
+  if (roomLabels[selectedRoomIdx] && roomScene) {
+    roomScene.remove(roomLabels[selectedRoomIdx]);
+  }
+  const c = polyCentroid(rm.polygon_mm);
+  const label = makeLabel(`${newName}\n${rm.area_m2}㎡`);
+  label.position.set(c[0] / 1000, 1.4, c[1] / 1000);
+  roomScene.add(label);
+  roomLabels[selectedRoomIdx] = label;
+
+  // 패널 + 사이드바 카운트 갱신
+  document.getElementById("selected-room-label").textContent = newName;
+  document.getElementById("room-name-select").value = _KNOWN_NAMES.includes(newName) ? newName : "";
+  const named = parsedData.rooms.filter(r => r.names && r.names.length).length;
+  document.getElementById("info-conf").textContent = `${parsedData.rooms.length} / ${named}`;
+}
+
+document.getElementById("room-name-select").addEventListener("change", e => {
+  if (e.target.value) document.getElementById("room-name-input").value = e.target.value;
+});
+document.getElementById("btn-apply-room-name").addEventListener("click", applyRoomName);
+document.getElementById("room-name-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") applyRoomName();
+});
+document.getElementById("btn-cancel-room-edit").addEventListener("click", () => selectRoom(null));
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────
 function showStatus(msg, type) {
