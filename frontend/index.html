@@ -2234,8 +2234,14 @@ function roomDims(poly, area_m2) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
   const W = x1 - x0, H = y1 - y0;
-  const bboxA = (W * H) / 1e6;
-  const isRect = bboxA > 0 && (area_m2 / bboxA) >= 0.95;
+  // 직사각형 판정: 모든 꼭짓점이 bbox 4변 중 하나에 ±60mm 이내 있어야 함.
+  // area/bboxA 비율 방식은 planarFaces 노드 병합(NODE_TOL 50mm)이 두 모서리를 반대 방향으로 밀면
+  // 비율이 0.95 미만으로 떨어져 실제 직사각형을 false로 오판 → bbox 경계 판정으로 대체.
+  const tol = 60;  // NODE_TOL(50)+여유. L자 내부 꼭짓점(bbox 안쪽 수백mm)은 통과 못 함.
+  const isRect = W > 0 && H > 0 && poly.every(p =>
+    Math.abs(p[0] - x0) <= tol || Math.abs(p[0] - x1) <= tol ||
+    Math.abs(p[1] - y0) <= tol || Math.abs(p[1] - y1) <= tol
+  );
   return { W, H, isRect };
 }
 
