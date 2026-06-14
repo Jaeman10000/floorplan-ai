@@ -726,6 +726,155 @@ def _max_inscribed_rect(region, target_cells=56):
     return (sx0, sy0, sx1, sy1)
 
 
+# ─── A-2: 정형 영역 규격 자동 분할 (알고리즘이 좌표, AI 안 씀) ───────────────
+# 측정(_proto_partition.py): 면적비례 treemap/guillotine은 얇은 칸(침실 폭<2.4m) 위반.
+# 규격 인지 BSP(분할점×절단방향 전수 시도, 칸별 위반 최소)는 정형에서 위반0(48㎡·70㎡, <22ms).
+# ★내접+분할은 정형 전용 — A세대(심한 ㄱ자) 내접은 16.8㎡(외곽의 22%)뿐이라 거실 1칸만, 나머지 잔여.
+
+# 방 가중치(면적 비례 배분) — 측정값. 거실 큼, 욕실 작음.
+_PART_WEIGHT = {"living": 2.2, "bedroom": 1.35, "kitchen": 1.0, "bath": 0.6}
+
+
+def _partition_program(nbed, nbath):
+    """침실N·욕실M + 거실 + 주방 → [(cat, name, weight)]. 규격 있는 핵심 방만(현관·다용도는 잔여)."""
+    prog = [("living", "거실", _PART_WEIGHT["living"])]
+    for i in range(nbed):
+        prog.append(("bedroom", f"침실{i+1}", _PART_WEIGHT["bedroom"]))
+    prog.append(("kitchen", "주방", _PART_WEIGHT["kitchen"]))
+    for i in range(nbath):
+        nm = f"욕실{i+1}" if nbath > 1 else "욕실"
+        prog.append(("bath", nm, _PART_WEIGHT["bath"]))
+    return prog
+
+
+def _spec_check(cat, w, h):
+    """칸(w×h mm) 규격 충족? → (폭ok, 면적ok, 결정변mm, 면적㎡). 거실=긴변, 그 외=짧은변."""
+    spec = _ARCH.get(cat, _ARCH["other"])
+    short, long = min(w, h), max(w, h)
+    side = long if cat == "living" else short
+    area = (w * h) / 1e6
+    okw = (spec["min_w"] == 0) or (side >= spec["min_w"] - 1)
+    oka = (spec["min_area"] == 0) or (area >= spec["min_area"] - 0.05)
+    return okw, oka, side, area
+
+
+def _cell_penalty(cat, w, h):
+    okw, oka, _, _ = _spec_check(cat, w, h)
+    return (0 if okw else 1) + (0 if oka else 1)
+
+
+def _partition_feasible(prog, rect):
+    """min_area 합 + (min_area 0인 방당 4㎡) > 면적이면 물리적 불가 → 거부. (need_m2, have_m2, ok)."""
+    x0, y0, x1, y1 = rect
+    have = (x1 - x0) * (y1 - y0) / 1e6
+    need = 0.0
+    for cat, _, _ in prog:
+        spec = _ARCH.get(cat, _ARCH["other"])
+        need += spec["min_area"] if spec["min_area"] > 0 else 4.0
+    return need, have, (need <= have)
+
+
+def _partition_bsp(prog, rect):
+    """규격 인지 재귀 이분할. 방을 큰 것부터 정렬 → 각 단계 분할점 k×절단방향(v/h) 전수 시도,
+    칸별 규격 위반합 + 0.01×종횡비 페널티 최소 분기 선택. 잎=1방=1칸.
+    반환 [{cat, name, x, y, w, h}] (cat/name은 잠정 — 이후 _assign_roles_by_facing가 확정)."""
+    def rec(rooms, x, y, w, h):
+        if len(rooms) == 1:
+            cat, nm, wt = rooms[0]
+            return [{"cat": cat, "name": nm, "x": x, "y": y, "w": w, "h": h}]
+        wsum = sum(r[2] for r in rooms)
+        best, best_pen = None, float("inf")
+        for k in range(1, len(rooms)):
+            g1, g2 = rooms[:k], rooms[k:]
+            r1 = sum(r[2] for r in g1) / wsum
+            for cut in ("v", "h"):
+                if cut == "v":
+                    w1 = w * r1
+                    if w1 < 1 or w - w1 < 1:
+                        continue
+                    cells = rec(g1, x, y, w1, h) + rec(g2, x + w1, y, w - w1, h)
+                else:
+                    h1 = h * r1
+                    if h1 < 1 or h - h1 < 1:
+                        continue
+                    cells = rec(g1, x, y, w, h1) + rec(g2, x, y + h1, w, h - h1)
+                pen = sum(_cell_penalty(c["cat"], c["w"], c["h"]) for c in cells)
+                pen += 0.01 * sum(max(c["w"], c["h"]) / max(1, min(c["w"], c["h"])) for c in cells)
+                if pen < best_pen:
+                    best_pen, best = pen, cells
+        return best if best else [{"cat": rooms[0][0], "name": rooms[0][1],
+                                   "x": x, "y": y, "w": w, "h": h}]
+    order = sorted(prog, key=lambda p: -p[2])   # 큰 방(거실) 먼저
+    x0, y0, x1, y1 = rect
+    return rec(order, x0, y0, x1 - x0, y1 - y0)
+
+
+def _assign_roles_by_facing(cells, prog, bpoly, edge_dirs):
+    """BSP 칸(기하 고정)에 용도(category·name)를 결정적으로 배정.
+    채광 필요 용도(거실·침실)는 외곽 접함 칸에 우선, 방위 알면 남향 우선. 물공간은 내부/북향.
+    좌표는 절대 안 건드림. 반환 (assigned_cells, hard_count).
+    규격(폭/면적)·채광 위반은 HARD로 세고, HARD>0이면 호출부가 거부."""
+    from shapely.geometry import Polygon
+    # 각 칸 메타: 폴리곤·외곽접함(daylight)·방위 set
+    metas = []
+    for c in cells:
+        poly = Polygon([(c["x"], c["y"]), (c["x"] + c["w"], c["y"]),
+                        (c["x"] + c["w"], c["y"] + c["h"]), (c["x"], c["y"] + c["h"])])
+        daylight = _touches_outer(poly, bpoly)
+        facings = _room_facings(poly, bpoly, edge_dirs) if edge_dirs else set()
+        metas.append({"cell": c, "poly": poly, "daylight": daylight, "facings": facings,
+                      "area": c["w"] * c["h"], "assigned": False})
+
+    # 배정 순서: 거실 → 침실 → 주방 → 욕실 (채광 필요 먼저, 큰 것 먼저)
+    cat_order = []
+    for cat in ("living", "bedroom", "kitchen", "bath"):
+        for (pc, pn, pw) in prog:
+            if pc == cat:
+                cat_order.append((pc, pn))
+
+    def south_score(m, cat):
+        # 방위 알면: 거실·침실은 남>동 선호, 물공간은 북>서 선호
+        f = m["facings"]
+        if not f:
+            return 0
+        if cat in ("living", "bedroom"):
+            return (2 if "남" in f else 0) + (1 if "동" in f else 0)
+        return (2 if "북" in f else 0) + (1 if "서" in f else 0)
+
+    assigned = []
+    hard = 0
+    for cat, nm in cat_order:
+        spec = _ARCH.get(cat, _ARCH["other"])
+        need_daylight = spec["daylight"]
+        cands = [m for m in metas if not m["assigned"]]
+        if not cands:
+            hard += 1
+            continue
+        # 우선순위: (채광요건 충족) → (규격 충족) → 방위점수 → 면적(거실·침실은 큰 것, 물공간은 작은 것)
+        def keyf(m):
+            okw, oka, _, _ = _spec_check(cat, m["cell"]["w"], m["cell"]["h"])
+            day_ok = (not need_daylight) or m["daylight"]
+            spec_ok = okw and oka
+            area_pref = m["area"] if cat in ("living", "bedroom") else -m["area"]
+            return (0 if day_ok else 1, 0 if spec_ok else 1, -south_score(m, cat), -area_pref)
+        cands.sort(key=keyf)
+        pick = cands[0]
+        pick["assigned"] = True
+        okw, oka, side, area = _spec_check(cat, pick["cell"]["w"], pick["cell"]["h"])
+        if spec["min_w"] and not okw:
+            hard += 1
+        if spec["min_area"] and not oka:
+            hard += 1
+        if need_daylight and not pick["daylight"]:
+            hard += 1
+        assigned.append({**pick["cell"], "cat": cat, "name": nm})
+    # 남은 칸(있다면) = other
+    for m in metas:
+        if not m["assigned"]:
+            assigned.append({**m["cell"], "cat": "other", "name": "여유공간"})
+    return assigned, hard
+
+
 _LAYOUT_SYSTEM = (
     "당신은 시공업자를 돕는 주거 평면 설계 보조다. 주어진 '빈 외곽'(한 세대의 벽 없는 "
     "내부 공간) 안에 방을 '축정렬 직사각형'으로 배치한 평면 초안을 만든다. 벽 선분이 "
@@ -1307,6 +1456,142 @@ async def generate_layout(payload: dict):
         "walls": walls, "count": len(walls),
         "rooms": room_list, "bedrooms": rooms, "baths": baths,
         "warnings": warnings, "ok": ok, "attempts": attempts,
+    })
+
+
+@app.post("/api/partition-layout")
+async def partition_layout(payload: dict):
+    """A-2: 정형 영역 규격 자동 분할 — 알고리즘이 좌표, AI 안 씀(키 불필요).
+    내접 직사각형을 받은 방 개수에 맞춰 규격 인지 BSP로 빈틈없이 분할. 못 넣으면 거부.
+    비정형 잔여(외곽-내접)는 designZones 가이드로 표시(직접 마감). generate-layout과 별개."""
+    boundary = payload.get("boundary_mm") or []
+    if len(boundary) < 3:
+        raise HTTPException(400, "boundary_mm 좌표가 3개 미만입니다.")
+    unit = (payload.get("unit") or "").strip() or None
+
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
+    if not bpoly.is_valid:
+        bpoly = bpoly.buffer(0)
+    area_m2 = round(bpoly.area / 1e6, 1)
+
+    # 고정 방 차감 → 사용가능영역(avail)
+    fixed_in = payload.get("fixed_rooms") or []
+    fixed_polys = []
+    for fr in fixed_in:
+        poly = fr.get("poly") or []
+        if len(poly) < 3:
+            continue
+        try:
+            fp = Polygon([(float(p[0]), float(p[1])) for p in poly])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not fp.is_valid:
+            fp = fp.buffer(0)
+        if (not fp.is_empty) and fp.area > 0:
+            fixed_polys.append(fp)
+    avail = bpoly
+    if fixed_polys:
+        try:
+            avail = bpoly.difference(unary_union(fixed_polys)).buffer(0)
+        except Exception as e:
+            raise HTTPException(500, f"사용가능영역 계산 실패: {str(e)}")
+        if avail.is_empty or avail.area < 2e6:
+            return JSONResponse({"ok": False, "walls": [], "rooms": [], "residual_zones": [],
+                                 "reason": "고정 방을 빼면 분할할 빈 공간이 거의 없습니다."})
+
+    # 방/화장실 개수: JJ 입력 우선, 없으면 면적 기반 기본값
+    def _as_int(v):
+        try:
+            n = int(v)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+    nbed = _as_int(payload.get("rooms"))
+    nbath = _as_int(payload.get("baths"))
+    if nbed is None or nbath is None:
+        d_rooms, d_baths = _default_room_counts(area_m2)
+        if nbed is None:
+            nbed = d_rooms
+        if nbath is None:
+            nbath = d_baths
+
+    orientation = (payload.get("building_orientation") or "").strip() or None
+    edge_dirs = _edge_directions(orientation)
+
+    # 내접 직사각형(주 생활공간 분할 대상)
+    inner = _max_inscribed_rect(avail)
+    if not inner:
+        return JSONResponse({"ok": False, "walls": [], "rooms": [], "residual_zones": [],
+                             "reason": "분할할 반듯한 내접 영역을 찾지 못했습니다(매우 비정형)."})
+    inner_area = (inner[2] - inner[0]) * (inner[3] - inner[1]) / 1e6
+
+    prog = _partition_program(nbed, nbath)
+    need, have, ok_feas = _partition_feasible(prog, inner)
+
+    # 잔여(외곽/avail − 내접) — 가이드 존
+    inner_poly = Polygon([(inner[0], inner[1]), (inner[2], inner[1]),
+                          (inner[2], inner[3]), (inner[0], inner[3])])
+    residual_zones = []
+    try:
+        resid = avail.difference(inner_poly).buffer(0)
+        geoms = resid.geoms if resid.geom_type == "MultiPolygon" else [resid]
+        for g in geoms:
+            if g.is_empty or g.area < 2e6:   # 2㎡ 미만 조각 무시
+                continue
+            ring = [[round(px, 1), round(py, 1)] for px, py in g.exterior.coords]
+            residual_zones.append({"name": "잔여 — 다용도/발코니 추천(직접 마감)",
+                                   "poly": ring, "area_m2": round(g.area / 1e6, 1)})
+    except Exception:
+        residual_zones = []
+    residual_area = round(sum(z["area_m2"] for z in residual_zones), 1)
+
+    # feasibility 게이트: 내접에 규격상 못 담으면 거부(우겨넣지 않음)
+    if not ok_feas:
+        msg = (f"이 세대의 반듯한 영역({inner_area:.1f}㎡)으로는 "
+               f"침실{nbed}·욕실{nbath}+거실+주방의 최소 {need:.0f}㎡를 담을 수 없습니다. "
+               f"방·욕실 수를 줄이거나, 비정형 잔여({residual_area:.1f}㎡)는 직접 그리세요.")
+        print(f"[partition-layout] 거부(feasibility): 내접 {inner_area:.1f}㎡ < 필요 {need:.0f}㎡ "
+              f"(침실{nbed}·욕실{nbath})")
+        return JSONResponse({"ok": False, "walls": [], "rooms": [], "residual_zones": residual_zones,
+                             "reason": msg})
+
+    # 규격 인지 BSP 분할 → 용도 배정
+    cells = _partition_bsp(prog, inner)
+    assigned, hard = _assign_roles_by_facing(cells, prog, bpoly, edge_dirs)
+    print(f"[partition-layout] {unit} 내접 {inner_area:.1f}㎡ 분할: 칸 {len(assigned)}개, HARD {hard}, "
+          f"잔여 {residual_area:.1f}㎡ (외곽 {area_m2}㎡)")
+
+    if hard > 0:
+        # 규격을 못 맞추는 배치 → 거부(우겨넣지 않음)
+        msg = (f"규격에 맞는 빈틈없는 분할을 찾지 못했습니다(위반 {hard}건). "
+               f"이 면적엔 침실{nbed}·욕실{nbath}가 빡빡합니다 — 수를 줄여 보세요.")
+        print(f"[partition-layout] 거부(규격): HARD {hard}건")
+        return JSONResponse({"ok": False, "walls": [], "rooms": [], "residual_zones": residual_zones,
+                             "reason": msg})
+
+    # 다운스트림 재사용: 칸 rect → 격자스냅·외곽클립·벽 dedup (clip_poly=avail)
+    rects = [{"name": c["name"], "x": c["x"], "y": c["y"], "w": c["w"], "h": c["h"]}
+             for c in assigned if c["cat"] != "other"]
+    clip_poly = avail if fixed_polys else None
+    room_list, walls = _rects_to_rooms_and_walls(rects, boundary, clip_poly=clip_poly)
+    if not room_list or not walls:
+        return JSONResponse({"ok": False, "walls": [], "rooms": [], "residual_zones": residual_zones,
+                             "reason": "분할 결과가 외곽을 벗어나 남는 게 없습니다."})
+
+    # 정직한 안내 문구
+    if residual_area < max(2.0, inner_area * 0.15):
+        note = f"내접 영역({inner_area:.1f}㎡) 규격 자동 분할 완료 — 방 {len(room_list)}개."
+    else:
+        note = (f"비정형이라 일부만 자동 분할({inner_area:.1f}㎡, 방 {len(room_list)}개). "
+                f"나머지 {residual_area:.1f}㎡는 가이드 — 직접 마감하세요.")
+
+    return JSONResponse({
+        "ok": True, "walls": walls, "count": len(walls),
+        "rooms": room_list, "bedrooms": nbed, "baths": nbath,
+        "residual_zones": residual_zones, "inner_area_m2": round(inner_area, 1),
+        "residual_area_m2": residual_area, "reason": note,
     })
 
 

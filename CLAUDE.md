@@ -774,6 +774,46 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         나가면 사라짐. **오피스텔로도 1회**. 통과 전 미완료.
       ⚠️ **ANTHROPIC_API_KEY 필요**(design-advice와 동일). 자동검증은 목으로 키 없이.
       ⚠️ 한계: 존은 AI 추정 대략값(정밀 보장 X, 클립으로 외곽 안엔 유지). zones 안 주거나 깨지면 텍스트만(존 없음).
+- [x] **A-2 정형 영역 규격 자동 분할 — 알고리즘이 좌표, AI 안 씀(키 불필요)**(AI 좌표 방식이 규격 미달
+      1.16m 침실·욕여넣기로 계속 실패 → 좌표 계산을 코드로 넘기고 규격을 100% 강제. generate-layout 공존).
+      ★**구현 전 프로토타입 측정**(`_proto_partition.py`, 실제 A외곽 추출 `_a_boundary.json`):
+        ①면적비례 treemap(squarify)·guillotine은 얇은 칸(침실 폭 1.66/1.88m) **위반 1~2건**.
+        ②**규격 인지 BSP(분할점 k×절단방향 v/h 전수 시도, 칸별 위반합+0.01×종횡비 최소 선택)는 정형에서
+          위반0**: 48㎡ 침실2·욕1, 70㎡ 침실3·욕2 모두 위반0·빈틈없음·<22ms. → **BSP 채택.**
+        ③**★내접+분할은 정형 전용**: A세대(심한 ㄱ자) 내접=**6.0×2.8m=16.8㎡(외곽 75.6㎡의 22%, 깊이 2.8m)**
+          뿐 → 침실2·욕1(필요33㎡) 거부, **"거실만" 16.8㎡만 통과**, 잔여 58.8㎡. A세대는 사실상 자동분할
+          불가(거실 1칸+큰 잔여). **A-2 실효 타깃=오피스텔·직사각 정형**, ㄱ자는 zones 가이드+수동이 현실.
+      **백엔드 `POST /api/partition-layout`**(키 불필요, 결정적): boundary+fixed+개수+방위 →
+        ①고정방 차감 avail → ②`_max_inscribed_rect(avail)` 내접 → ③`_partition_feasible`(min_area합+zero-min방
+          ×4㎡ > 내접이면 **거부 ok:False**, 우겨넣지 않음) → ④`_partition_bsp`(가중치 거실2.2/침실1.35/주방1.0/
+          욕실0.6) → ⑤`_assign_roles_by_facing`(`_edge_directions`/`_touches_outer`/`_room_facings` 재사용, 채광
+          필요 거실·침실=외곽접함·남향 우선, 물공간=내부/북향, **좌표 안 건드림**, HARD>0이면 **거부**) →
+          ⑥칸 rect → 기존 **`_rects_to_rooms_and_walls`/`_clipped_rooms`/`_postprocess_walls` 재사용**(격자스냅·
+          외곽클립·벽 dedup, walls 포맷 불변) → `{ok, walls, rooms, residual_zones, inner_area_m2, residual_area_m2,
+          reason}`. 잔여=`avail.difference(내접)` 폴리곤들(2㎡↑)을 residual_zones로(거부여도 표시). 서버 콘솔에
+          feasibility·HARD·거부 로그.
+      **프런트**: 자동배치 카드(③) 안에 신규 **`btn-partition-layout`("📐 규격 자동 분할 (정형 세대용)")를 기존
+        `btn-generate-layout` 위에** 배치(측정상 정형엔 우월)+각 버튼 설명 1줄. 방/욕실/방위 입력 공유. `partitionLayout()`:
+        호출→**ok:False면 벽 안 건드리고 사유 표시(기존 작업 보존)**, ok면 designWalls 대체+`ensureLockedWalls`
+        (고정방 보존)+`recomputeDesignRooms`/렌더, **designHistory push(undo 1단위)**. residual_zones는 ok 무관하게
+        **기존 `designZones`/`renderDesignZones` 재사용**으로 "잔여 — 다용도/발코니 추천(직접 마감)" 표시. 정직한
+        reason 문구(정형="자동 분할 완료" / 비정형="일부만 N㎡, 나머지 M㎡ 가이드" / 거부=사유). `updateDesignActions`
+        에 활성 1줄.
+      무수정: generate-layout·직사각형방/이름/클릭클릭/고정방/조언·존/undo/clear/autosave/묶기 localStorage/
+        내보내기/renderToBe/recomputeDesignRooms/beforeunload + 기존 백엔드 함수(`_rects_to_rooms_and_walls`/
+        `_clipped_rooms`/`_postprocess_walls`/`_validate_layout` 시그니처). 변경=신규 추가(_partition_*·
+        _assign_roles_by_facing·partition-layout·partitionLayout·버튼) + updateDesignActions/핸들러 와이어 1줄.
+      검증: ①(자동) `_verify_partition_backend.py` 29/29 — _partition_bsp(48㎡/70㎡ 위반0·빈틈없음·<200ms)·
+        feasibility 거부(14㎡/침실3·30㎡/침실2·A내접16.8㎡ 풀프로그램 거부·거실만 통과)·**A내접=외곽 22% 측정**·
+        방위 배정(남향 거실·침실 위쪽·HARD0)·다운스트림(BSP칸→방5 벽17 dedup·NaN0)·엔드포인트(정형48㎡ ok·
+        작은14㎡ 거부+벽보존·A세대 거부+잔여존1·정형 잔여<8㎡·boundary<3→400). 회귀 8종(zones/clickdraw/
+        rectroom/fixedroom/genlayout/export/autosave/design_advice) 전부 그린. ②(프런트 스모크) A세대 클릭→거부·
+        designWalls 0 보존·잔여존1·에러0.
+      ③(JJ 수동·필수, 실제) **A세대 침실2 욕1→내접에 규격 칸 빈틈없이·1.16m 미달 없음·ㄱ자 잔여 가이드·
+        침실3 거부(콘솔 사유)** / **오피스텔(정형)→침실N 규격 분할 깔끔(A-2 진짜 타깃)** / 서버 콘솔 feasibility·
+        위반·거부 로그. 통과 전 미완료.
+      ⚠️ 한계: 내접+분할은 정형 전용(측정). ㄱ자는 거실 정도만+큰 잔여(수동). 칸은 격자스냅 후 미세 오차 가능
+        (다운스트림 클립이 흡수). AI 이름 배정(c2)은 현재 미적용(결정적 배정만, 키 불필요) — 필요 시 다음 증분.
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)

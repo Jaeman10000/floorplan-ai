@@ -610,9 +610,8 @@
           <button class="action-btn btn-primary" id="btn-lock-fixed" style="width:100%; margin-top:8px; padding:9px;" disabled>🔒 고정으로 잠금</button>
         </div>
         <div id="design-fix-list" style="display:none; font-size:12px; color:#ddd;"></div>
-        <!-- ③ AI 구조 초안 생성 (방/화장실 개수 + 방위) -->
+        <!-- ③ 자동 배치 (방/화장실 개수 + 방위 입력 공유) -->
         <div style="padding:8px; background:#161a22; border-radius:8px;">
-          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
           <label style="display:block; font-size:11px; color:#bbb; margin-bottom:6px;">도면 위쪽 방위 (채광·배치 강화 — 모르면 '모름')
             <select id="design-orientation-select"
               style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
@@ -633,7 +632,12 @@
                 style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
             </label>
           </div>
+          <!-- 신규: 규격 자동 분할 (정형 세대용) — 측정상 정형엔 AI보다 우월 → 위에 배치 -->
+          <button class="action-btn btn-primary" id="btn-partition-layout" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:700; cursor:pointer;" disabled>📐 규격 자동 분할 (정형 세대용)</button>
+          <div style="font-size:10px; color:#7d7d8a; margin-top:5px; line-height:1.5;">반듯한 영역을 규격에 맞춰 빈틈없이 자동 배치. 비정형(ㄱ자 등)은 일부만 됩니다.</div>
+          <!-- 기존: AI 구조 초안 (자유 배치) -->
           <button class="btn-secondary" id="btn-generate-layout" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🤖 AI 구조 초안 생성</button>
+          <div style="font-size:10px; color:#7d7d8a; margin-top:5px; line-height:1.5;">AI가 자유롭게 방을 배치(개수 비우면 면적 기준 자동). 비정형에도 시도하나 규격은 보장 못 함.</div>
         </div>
         <!-- ④ 저장 / 내보내기 / 편집 액션 — 하단 -->
         <button class="action-btn btn-primary" id="btn-save-design" style="width:100%;" disabled>💾 이 세대 새 구조 저장 (To-Be)</button>
@@ -2863,11 +2867,86 @@ async function generateLayout() {
   }
 }
 
+// ── A-2: 규격 자동 분할 (정형 세대용) ───────────────────────────────────────
+// 내접 직사각형을 규격 인지 BSP로 빈틈없이 분할(알고리즘이 좌표, AI 안 씀). 못 넣으면 거부.
+// 비정형 잔여는 designZones 가이드로 표시. 결과 벽=undo 1단위. generate-layout과 별개.
+async function partitionLayout() {
+  if (!designMode || !designUnit) { showStatus("설계 모드에서 세대를 선택하세요.", "error"); return; }
+  if (!designBoundary || designBoundary.length < 3) { showStatus("외곽이 없습니다.", "error"); return; }
+
+  if (designWalls.length) {
+    if (!confirm("그린 벽(고정 방 제외)이 자동 분할 결과로 대체됩니다. 고정 방은 보존됩니다. 계속할까요? (Ctrl+Z로 되돌릴 수 있음)")) return;
+  }
+
+  const roomsVal = document.getElementById("gen-rooms").value.trim();
+  const bathsVal = document.getElementById("gen-baths").value.trim();
+  const dOri = document.getElementById("design-orientation-select");
+  const orientation = (dOri && dOri.value) || (document.getElementById("orientation-select") || {}).value || "모름";
+  const body = {
+    boundary_mm: designBoundary.map(p => p.slice()),
+    unit: designUnit,
+    building_orientation: orientation,
+    fixed_rooms: designFixedRooms.map(fr => ({ name: fr.name, poly: fr.poly.map(p => p.slice()) })),
+  };
+  if (roomsVal !== "") body.rooms = parseInt(roomsVal, 10);
+  if (bathsVal !== "") body.baths = parseInt(bathsVal, 10);
+
+  const btn = document.getElementById("btn-partition-layout");
+  const prevTxt = btn.textContent;
+  btn.disabled = true; btn.textContent = "📐 분할 중…";
+  const ctrl = new AbortController();
+  const killer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const res = await fetch(`${API}/api/partition-layout`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: ctrl.signal });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    const data = await res.json();
+    // 잔여 가이드 존은 ok 여부와 무관하게 표시(거부여도 어디가 비정형인지 보여줌)
+    designZones = Array.isArray(data.residual_zones) ? data.residual_zones : [];
+    designZonesVisible = true;
+    renderDesignZones();
+    const zb = document.getElementById("btn-zone-toggle");
+    if (zb) zb.textContent = designZones.length ? "🗺️ 위치 존 숨김" : "🗺️ 위치 존 표시";
+
+    if (data.ok === false) {
+      // 거부 — 벽 안 건드림(기존 작업 보존), 사유 표시
+      showStatus(`📐 ${UNIT_LABELS[designUnit]} 자동 분할 거부: ${data.reason || "규격에 맞지 않습니다."}`, "error");
+      updateDesignActions();
+      return;
+    }
+    const newWalls = (data.walls || []).map(w => ({ a: w.a.slice(), b: w.b.slice() }));
+    if (!newWalls.length) { showStatus("분할 결과 벽이 없습니다. 기존 작업은 그대로입니다.", "error"); return; }
+    // 분할 결과 = undo 1단위
+    designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+    if (designHistory.length > 50) designHistory.shift();
+    designWalls = newWalls;
+    ensureLockedWalls();   // 고정 방 벽 재주입 + dedup
+    designRoomNames = (data.rooms || []).map(r => ({ name: r.name, cx: r.cx, cy: r.cy }));
+    recomputeDesignRooms();
+    renderDesignWalls();
+    renderDesignRooms();
+    updateDesignActions();
+    const base = `📐 ${UNIT_LABELS[designUnit]} 규격 자동 분할 (벽 ${newWalls.length}·방 ${designRooms.length}, 침실 ${data.bedrooms}·욕실 ${data.baths})`;
+    showStatus(`${base} — ${data.reason || ""} 클릭-클릭으로 다듬으세요. Ctrl+Z=취소.`, "ok");
+  } catch (err) {
+    showStatus(err.name === "AbortError"
+      ? "자동 분할 시간 초과(30초). 다시 시도하세요. 기존 작업은 그대로입니다."
+      : "자동 분할 실패: " + err.message, "error");
+  } finally {
+    clearTimeout(killer);
+    btn.disabled = false; btn.textContent = prevTxt;
+    updateDesignActions();
+  }
+}
+
 function updateDesignActions() {
   const wrap = document.getElementById("design-actions");
   if (wrap) wrap.style.display = designMode ? "flex" : "none";
   const gl = document.getElementById("btn-generate-layout");
   if (gl) gl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
+  const pl = document.getElementById("btn-partition-layout");
+  if (pl) pl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const ba = document.getElementById("btn-advice");
   if (ba) ba.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const br = document.getElementById("btn-advice-replay");
@@ -2949,6 +3028,7 @@ document.getElementById("btn-clear-design").addEventListener("click", clearDesig
 document.getElementById("btn-revert-design").addEventListener("click", revertDesignToOriginal);
 document.getElementById("btn-save-design").addEventListener("click", saveDesign);
 document.getElementById("btn-generate-layout").addEventListener("click", generateLayout);
+document.getElementById("btn-partition-layout").addEventListener("click", partitionLayout);
 // 방위 셀렉트 양방향 동기화 (설계 패널 ↔ AI 조언 섹션): 어느 쪽을 바꿔도 일치
 (function syncOrientationSelects() {
   const a = document.getElementById("design-orientation-select");
