@@ -2786,13 +2786,18 @@ function deleteSelectedRoom() {
     const ax = w.a[0], ay = w.a[1], bx = w.b[0], by = w.b[1];
     const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
     if (L < 1) { keepIdx.push(wi); continue; }   // 퇴화 벽은 그냥 둠(dedup이 처리)
-    const mx = (ax + bx) / 2, my = (ay + by) / 2;
     const nx = -dy / L, ny = dx / L;             // 단위 수직
-    const pa = [mx + nx * EPS, my + ny * EPS];
-    const pb = [mx - nx * EPS, my - ny * EPS];
-    const inA = pointInPoly(pa, poly), inB = pointInPoly(pb, poly);
-    if (inA === inB) { keepIdx.push(wi); continue; }   // 이 방 경계벽 아님(내부 댕글링/무관)
-    const outPt = inA ? pb : pa;                  // 방 바깥쪽 점
+    // 단일 중점 대신 5개 샘플(t=0.1~0.9): 전체 벽 중점이 방 모서리·T접합과 겹치면
+    // ±EPS 두 점이 모두 경계 바깥에 떨어져 탐지 실패하는 버그 수정.
+    let isBnd = false, outPt = null;
+    for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+      const tx = ax + t * (bx - ax), ty = ay + t * (by - ay);
+      const pa2 = [tx + nx * EPS, ty + ny * EPS];
+      const pb2 = [tx - nx * EPS, ty - ny * EPS];
+      const iA = pointInPoly(pa2, poly), iB = pointInPoly(pb2, poly);
+      if (iA !== iB) { isBnd = true; outPt = iA ? pb2 : pa2; break; }
+    }
+    if (!isBnd) { keepIdx.push(wi); continue; }   // 이 방 경계벽 아님(내부 댕글링/무관)
     // 바깥쪽이 다른 방 안이면 공유변 → 유지. 외부 void면 전용변 → 삭제.
     let shared = false;
     for (let ri = 0; ri < designRooms.length; ri++) {
