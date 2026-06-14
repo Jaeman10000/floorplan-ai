@@ -562,7 +562,10 @@
           <label for="design-trend-input" style="display:block; font-size:11px; color:#cbd; margin-bottom:4px;">📋 시장/트렌드 정보 (선택)</label>
           <textarea id="design-trend-input" placeholder="예: 이 동네 30대 신혼부부 많음, 방2개 선호 / buji-terminal 분석 결과 붙여넣기"
             style="width:100%; box-sizing:border-box; min-height:54px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
-          <button id="btn-advice" disabled style="margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none; width:100%;">💡 AI에게 설계 조언 받기</button>
+          <div style="display:flex; gap:6px; margin-top:8px;">
+            <button id="btn-advice" disabled style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none;">💡 AI에게 설계 조언 받기</button>
+            <button id="btn-advice-replay" disabled title="마지막 조언 다시 보기" style="padding:9px 10px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#2e2640; color:#c4b5fd; border:1px solid #4c1d95; white-space:nowrap;">📄 다시 보기</button>
+          </div>
         </div>
         <!-- ② 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
         <div style="display:flex; gap:6px;">
@@ -2619,6 +2622,7 @@ async function exportPlanPdf() {
 
 // ── 설계 조언 모달 ──────────────────────────────────────────────────────────
 let _adviceModalOpen = false;
+let _lastDesignAdvice = null;   // { text, unit } — API 재호출 없이 다시 보기
 
 function openAdviceModal(text) {
   const overlay = document.getElementById("advice-modal-overlay");
@@ -2645,6 +2649,24 @@ window.addEventListener("load", function initAdviceModal() {
   document.getElementById("advice-modal-btn-close").addEventListener("click", closeAdviceModal);
   overlay.addEventListener("click", e => { if (e.target === overlay) closeAdviceModal(); });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && _adviceModalOpen) closeAdviceModal(); });
+  // 복사 버튼
+  const copyBtn = document.getElementById("advice-modal-btn-copy");
+  if (copyBtn) copyBtn.addEventListener("click", () => {
+    const text = document.getElementById("advice-modal-body").textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = copyBtn.textContent;
+      copyBtn.textContent = "✅ 복사됨";
+      setTimeout(() => { copyBtn.textContent = orig; }, 2000);
+    }).catch(() => showStatus("클립보드 복사 실패 (브라우저 권한 확인)", "error"));
+  });
+});
+
+// 다시 보기 버튼 — 캐시된 조언 바로 열기 (API 재호출 없음)
+document.addEventListener("DOMContentLoaded", () => {
+  const rb = document.getElementById("btn-advice-replay");
+  if (rb) rb.addEventListener("click", () => {
+    if (_lastDesignAdvice) openAdviceModal(_lastDesignAdvice.text);
+  });
 });
 
 // ── 설계 시작 조언 (텍스트만, 벽 생성 안 함) ────────────────────────────────
@@ -2689,7 +2711,9 @@ async function requestDesignAdvice() {
       body: JSON.stringify(body), signal: ctrl.signal });
     if (!res.ok) throw new Error((await res.text()).slice(0, 200));
     const data = await res.json();
-    openAdviceModal(data.answer || "(응답 없음)");
+    const answer = data.answer || "(응답 없음)";
+    _lastDesignAdvice = { text: answer, unit: designUnit };
+    openAdviceModal(answer);
     showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언 완료. 보고 방 도구로 직접 그리세요.`, "ok");
   } catch (err) {
     showStatus(err.name === "AbortError"
@@ -2783,6 +2807,8 @@ function updateDesignActions() {
   if (gl) gl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const ba = document.getElementById("btn-advice");
   if (ba) ba.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
+  const br = document.getElementById("btn-advice-replay");
+  if (br) br.disabled = !_lastDesignAdvice;
   const u = document.getElementById("btn-undo-design");
   const cl = document.getElementById("btn-clear-design");
   const rv = document.getElementById("btn-revert-design");
@@ -3050,7 +3076,10 @@ function showProgress(show) {
       <button id="advice-modal-close" title="닫기">×</button>
     </div>
     <div id="advice-modal-body"></div>
-    <div id="advice-modal-footer"><button id="advice-modal-btn-close">닫기</button></div>
+    <div id="advice-modal-footer">
+      <button id="advice-modal-btn-copy" style="margin-right:8px; background:#1e1a2e; border:1px solid #4c1d95;">📋 텍스트 복사</button>
+      <button id="advice-modal-btn-close">닫기</button>
+    </div>
   </div>
 </div>
 </body>

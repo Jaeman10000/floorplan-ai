@@ -117,12 +117,31 @@ with sync_playwright() as pw:
     assert "남향" in rendered, "응답 텍스트 모달 렌더 실패"
     assert modal_open, "모달이 열리지 않음"
     assert walls_before == walls_after == 0, "조언 요청이 벽을 생성함"
-    # 모달 닫기 (Esc) — 다음 테스트를 위해
+    # _lastDesignAdvice 캐싱 확인
+    cached = page.evaluate("_lastDesignAdvice && _lastDesignAdvice.text")
+    print(f"[5a 캐시] _lastDesignAdvice.text={str(cached)[:30] if cached else None}")
+    assert cached and "남향" in cached, "_lastDesignAdvice에 조언 캐싱 실패"
+    # 다시 보기 버튼 활성 확인
+    replay_disabled = page.evaluate("document.getElementById('btn-advice-replay').disabled")
+    print(f"[5b 다시보기] disabled={replay_disabled} (False여야)")
+    assert replay_disabled is False, "캐시 후 다시 보기 버튼이 비활성"
+    # 모달 닫기 (Esc)
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
     closed = not page.evaluate("document.getElementById('advice-modal-overlay').classList.contains('open')")
-    print(f"[5 Esc 닫기] closed={closed}")
+    print(f"[5c Esc 닫기] closed={closed}")
     assert closed, "Esc로 모달이 안 닫힘"
+    # 다시 보기 버튼으로 API 없이 모달 재열기
+    page.click("#btn-advice-replay")
+    page.wait_for_timeout(200)
+    reopened = page.evaluate("document.getElementById('advice-modal-overlay').classList.contains('open')")
+    replay_text = page.evaluate("document.getElementById('advice-modal-body').textContent")
+    print(f"[5d 다시보기 클릭] reopened={reopened} text_match={'남향' in replay_text}")
+    assert reopened, "다시 보기 버튼으로 모달이 안 열림"
+    assert "남향" in replay_text, "다시 보기 모달 내용이 캐시와 다름"
+    # 모달 닫기 (닫기 버튼)
+    page.click("#advice-modal-btn-close")
+    page.wait_for_timeout(150)
 
     # ── 6. 직사각형 방 하나 그린 뒤 다시 조언 → current_rooms 반영 ──
     r = page.evaluate(FIND_RECT)
