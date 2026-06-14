@@ -522,44 +522,20 @@
           <button class="du-btn eu-btn" data-unit="common">공용</button>
         </div>
         <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
-        <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
-          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
-          <label style="display:block; font-size:11px; color:#bbb; margin-bottom:6px;">도면 위쪽 방위 (채광·배치 강화 — 모르면 '모름')
-            <select id="design-orientation-select"
-              style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
-              <option value="모름">모름</option>
-              <option value="북">북쪽</option>
-              <option value="남">남쪽</option>
-              <option value="동">동쪽</option>
-              <option value="서">서쪽</option>
-            </select>
-          </label>
-          <div style="display:flex; gap:6px;">
-            <label style="flex:1; font-size:11px; color:#bbb;">방
-              <input type="number" id="gen-rooms" min="1" max="8" placeholder="자동"
-                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
-            </label>
-            <label style="flex:1; font-size:11px; color:#bbb;">화장실
-              <input type="number" id="gen-baths" min="0" max="5" placeholder="자동"
-                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
-            </label>
-          </div>
-          <button class="btn-secondary" id="btn-generate-layout" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🤖 AI 구조 초안 생성</button>
-        </div>
-        <button class="action-btn btn-primary" id="btn-save-design" style="width:100%; margin-top:8px;" disabled>💾 이 세대 새 구조 저장 (To-Be)</button>
-        <div style="display:flex; gap:6px; margin-top:8px;">
-          <button class="btn-secondary" id="btn-export-png" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🖼️ 3D 이미지(PNG)</button>
-          <button class="btn-secondary" id="btn-export-pdf" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>📄 2D 평면도(PDF)</button>
-        </div>
       </div>
-      <div id="design-actions" style="display:none; flex-direction:column; gap:6px; margin-top:8px;">
-        <button class="btn-secondary" id="btn-undo-design" style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>↩️ 되돌리기 (Ctrl+Z)</button>
-        <div style="display:flex; gap:6px;">
-          <button class="btn-secondary" id="btn-clear-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>그리던 것 지우기</button>
-          <button class="btn-secondary" id="btn-revert-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>이 세대 원본으로</button>
+      <div id="design-actions" style="display:none; flex-direction:column; gap:8px; margin-top:8px;">
+        <!-- ① 💡 설계 시작 조언 — 트렌드 입력란과 조언 버튼을 한 카드로 묶음 -->
+        <div style="padding:10px; background:#1a1430; border:1px solid #4c1d95; border-radius:10px;">
+          <div style="font-size:12px; font-weight:700; color:#c4b5fd; margin-bottom:4px;">💡 설계 시작 조언</div>
+          <div style="font-size:11px; color:#9aa; margin-bottom:8px;">시장·트렌드 정보를 입력하면 조언에 반영됩니다 (비워도 됩니다)</div>
+          <label for="design-trend-input" style="display:block; font-size:11px; color:#cbd; margin-bottom:4px;">📋 시장/트렌드 정보 (선택)</label>
+          <textarea id="design-trend-input" placeholder="예: 이 동네 30대 신혼부부 많음, 방2개 선호 / buji-terminal 분석 결과 붙여넣기"
+            style="width:100%; box-sizing:border-box; min-height:54px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
+          <button id="btn-advice" disabled style="margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none; width:100%;">💡 AI에게 설계 조언 받기</button>
+          <div id="advice-response"></div>
         </div>
-        <!-- 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
-        <div style="display:flex; gap:6px; margin-top:4px;">
+        <!-- ② 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
+        <div style="display:flex; gap:6px;">
           <button class="btn-secondary" id="btn-rect-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">▭ 직사각형 방</button>
           <button class="btn-secondary" id="btn-name-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">✏️ 방 이름</button>
         </div>
@@ -599,11 +575,42 @@
           <button class="action-btn btn-primary" id="btn-lock-fixed" style="width:100%; margin-top:8px; padding:9px;" disabled>🔒 고정으로 잠금</button>
         </div>
         <div id="design-fix-list" style="display:none; font-size:12px; color:#ddd;"></div>
-        <!-- 트렌드/시장 정보 — 설계 조언 요청 시 반영 -->
-        <textarea id="design-trend-input" placeholder="buji-terminal 등 시장/트렌드 정보 (선택)"
-          style="width:100%; box-sizing:border-box; min-height:46px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
-        <button id="btn-advice" disabled style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none; width:100%;">💬 AI에게 조언 요청</button>
-        <div id="advice-response"></div>
+        <!-- ③ AI 구조 초안 생성 (방/화장실 개수 + 방위) -->
+        <div style="padding:8px; background:#161a22; border-radius:8px;">
+          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
+          <label style="display:block; font-size:11px; color:#bbb; margin-bottom:6px;">도면 위쪽 방위 (채광·배치 강화 — 모르면 '모름')
+            <select id="design-orientation-select"
+              style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+              <option value="모름">모름</option>
+              <option value="북">북쪽</option>
+              <option value="남">남쪽</option>
+              <option value="동">동쪽</option>
+              <option value="서">서쪽</option>
+            </select>
+          </label>
+          <div style="display:flex; gap:6px;">
+            <label style="flex:1; font-size:11px; color:#bbb;">방
+              <input type="number" id="gen-rooms" min="1" max="8" placeholder="자동"
+                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            </label>
+            <label style="flex:1; font-size:11px; color:#bbb;">화장실
+              <input type="number" id="gen-baths" min="0" max="5" placeholder="자동"
+                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            </label>
+          </div>
+          <button class="btn-secondary" id="btn-generate-layout" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🤖 AI 구조 초안 생성</button>
+        </div>
+        <!-- ④ 저장 / 내보내기 / 편집 액션 — 하단 -->
+        <button class="action-btn btn-primary" id="btn-save-design" style="width:100%;" disabled>💾 이 세대 새 구조 저장 (To-Be)</button>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-secondary" id="btn-export-png" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>🖼️ 3D 이미지(PNG)</button>
+          <button class="btn-secondary" id="btn-export-pdf" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>📄 2D 평면도(PDF)</button>
+        </div>
+        <button class="btn-secondary" id="btn-undo-design" style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>↩️ 되돌리기 (Ctrl+Z)</button>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-secondary" id="btn-clear-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>그리던 것 지우기</button>
+          <button class="btn-secondary" id="btn-revert-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>이 세대 원본으로</button>
+        </div>
       </div>
       <div class="edit-hint" id="design-hint" style="display:none;">
         내벽이 사라진 빈 외곽에 <b>시작점 클릭 → 끝점 클릭</b>으로 벽을 그으세요(드래그 아님).
