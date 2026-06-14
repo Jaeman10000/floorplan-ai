@@ -569,13 +569,35 @@
           <button id="btn-zone-toggle" disabled title="3D에 표시된 대략 위치 존 켜기/끄기" style="width:100%; margin-top:6px; padding:8px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#23202e; color:#c4b5fd; border:1px dashed #4c1d95;">🗺️ 위치 존 표시</button>
           <div style="font-size:10px; color:#7d7d8a; margin-top:6px; line-height:1.5;">점선 존은 AI 추정 <b>대략 위치</b>입니다 — 정확하지 않으니 방향 참고용. 직사각형 방 도구로 직접 그리세요.</div>
         </div>
-        <!-- ② 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
+        <!-- ② 서브모드 (상호배타): 직사각형 방 그리기 / 방 이름 / 크기·이동 / 고정 방 -->
         <div style="display:flex; gap:6px;">
           <button class="btn-secondary" id="btn-rect-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">▭ 직사각형 방</button>
           <button class="btn-secondary" id="btn-name-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">✏️ 방 이름</button>
+          <button class="btn-secondary" id="btn-edit-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">✥ 크기·이동</button>
         </div>
         <!-- 규격 가이드 (직사각형 모드일 때만 표시) -->
         <div id="design-spec-guide" style="display:none; padding:8px; background:#13202a; border:1px solid #1e3a4a; border-radius:8px; font-size:11px; color:#9fb8c8; line-height:1.6;"></div>
+        <!-- 크기·이동 패널 (✥ 모드일 때만 표시) -->
+        <div id="design-edit-panel" style="display:none; padding:8px; background:#161a22; border-radius:8px;">
+          <div id="edit-sel-info" style="font-size:11px; color:#9aa; margin-bottom:6px;">방을 클릭해 선택하세요.</div>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <label style="flex:1; font-size:11px; color:#bbb;">가로(mm)
+              <input type="number" id="edit-w-input" min="100" step="100" disabled
+                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            </label>
+            <span style="color:#9aa; margin-top:14px;">×</span>
+            <label style="flex:1; font-size:11px; color:#bbb;">세로(mm)
+              <input type="number" id="edit-h-input" min="100" step="100" disabled
+                style="width:100%; margin-top:3px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            </label>
+          </div>
+          <button class="action-btn btn-primary" id="btn-apply-size" style="width:100%; margin-top:8px; padding:9px;" disabled>📐 크기 적용</button>
+          <div id="edit-rect-note" style="display:none; font-size:10px; color:#e0a; margin-top:5px;">⚠️ 비직사각형 방은 크기 변경 불가(드래그 이동만 가능).</div>
+          <div style="font-size:10px; color:#7d7d8a; margin-top:6px; line-height:1.5;">
+            방 위를 <b>좌드래그</b>하면 이동(100mm 격자), 빈 곳 좌드래그=카메라. 크기는 <b>왼쪽아래 모서리 고정</b>.<br>
+            <b>옆 방과 붙어 있으면 공유 벽이 함께 움직입니다</b>(겹침/빈틈 가능). 고립된 방은 깔끔히 변합니다.
+          </div>
+        </div>
         <!-- 방 이름 붙이기 패널 -->
         <div id="design-name-panel" style="display:none; padding:8px; background:#161a22; border-radius:8px;">
           <div style="font-size:11px; color:#9aa; margin-bottom:6px;">닫힌 방을 클릭해 선택하고 이름을 정하세요</div>
@@ -659,10 +681,12 @@
         기존 벽·외곽 근처면 붙어서 그려져 벽이 만나면 닫힌 공간이 자동으로 방이 됩니다.<br>
         <b>▭ 직사각형 방</b>을 켜면 <b>대각선 두 점 클릭</b>으로 방 하나를 한 번에 그립니다(축정렬·100mm 격자 스냅).<br>
         <b>✏️ 방 이름</b>을 켜고 닫힌 방을 클릭→이름을 정하면 라벨이 붙습니다(저장·재진입 유지).<br>
+        <b>✥ 크기·이동</b>을 켜고 방을 클릭→<b>가로·세로 숫자</b>로 크기를 바꾸거나(왼쪽아래 고정),
+        방 위를 <b>좌드래그</b>해 옮깁니다(빈 곳 좌드래그=카메라). 규격 경고가 그 자리에서 갱신됩니다.<br>
         <b>💾 저장</b>하면 우측 To-Be 패널에 새 구조로 남고, 종료/재진입해도 유지됩니다.<br>
         <b>🔒 고정 방 지정</b>을 켜고 닫힌 방을 클릭→이름을 정해 잠그면 현관·다용도실처럼
         위치가 정해진 공간으로 고정됩니다(<b>그리던 것 지우기에도 보존</b>).<br>
-        세 모드(▭/✏️/🔒)는 <b>한 번에 하나만</b> 켜집니다. 우드래그=카메라 · <b>Esc/우클릭=취소</b> · Ctrl+Z=되돌리기.
+        서브모드(▭/✏️/✥/🔒)는 <b>한 번에 하나만</b> 켜집니다. 우드래그=카메라 · <b>Esc/우클릭=취소</b> · Ctrl+Z=되돌리기.
       </div>
     </div>
 
@@ -760,6 +784,13 @@ let designFixedRooms = [];     // JJ가 잠근 고정 방 [{name, poly(mm)}] —
 let designFixMode = false;     // 🔒 고정 방 지정 서브모드 (ON이면 좌클릭=면 선택)
 let designRectMode = false;    // ▭ 직사각형 방 그리기 서브모드 (대각선 2점)
 let designNameMode = false;    // ✏️ 방 이름 붙이기 서브모드 (면 클릭→이름)
+let designEditMode = false;    // ✥ 크기·이동 서브모드 (면 선택→W/H 변경·드래그 이동)
+let editDragging = false;      // 선택 방 드래그 이동 진행중 (카메라 충돌 분리용)
+let _editDragBase = null;      // 드래그 시작 시 designWalls 깊은복사 (라이브 평행이동 기준)
+let _editDragEnds = null;      // 옮길 끝점 참조 [{wi, end:'a'|'b', x0, y0}] — base 좌표
+let _editDragStartMM = null;   // 드래그 시작 포인터 mm [x,y]
+let _editDragCentroid0 = null; // 드래그 시작 시 선택 방 centroid [x,y] — 이동 후 재선택 추적
+let _editClickXY = null;       // edit 모드 좌다운 화면좌표+idx (클릭/카메라드래그 구분)
 let rectStart = null;          // 직사각형 첫 모서리 [x,y] mm (null=idle)
 let rectPreview = null;        // 직사각형 미리보기 LineLoop
 let rectSizeLabel = null;      // 직사각형 가로×세로 라벨
@@ -1232,6 +1263,17 @@ function renderParsed(panelId, phId, data, key) {
     // orbit 좌버튼은 designMode에서 비활성. stopImmediatePropagation으로 room-select도 차단.
     renderer.domElement.addEventListener("mousedown", e => {
       if (!designMode || e.button !== 0 || !designBoundary) return;
+      // ✥ 크기·이동 모드: 선택 방 위 좌다운=이동(카메라 차단), 그 외=통과(카메라 회전 허용)
+      if (designEditMode) {
+        const idx = _pickDesignFaceIdx(e);
+        if (idx >= 0 && idx === selectedDesignFace) {
+          beginEditDrag(e);
+          e.stopImmediatePropagation(); e.preventDefault();   // 카메라·선택 차단
+        } else {
+          _editClickXY = { x: e.clientX, y: e.clientY, idx };  // 클릭=선택 / 드래그=카메라(orbit이 처리)
+        }
+        return;
+      }
       _drawDownXY = { x: e.clientX, y: e.clientY };
       e.stopImmediatePropagation(); e.preventDefault();
     }, true);
@@ -1293,7 +1335,8 @@ function attachOrbit(renderer, camera, cx, cz, maxDist) {
   updateCamera();
   renderer.domElement.addEventListener("mousedown", e => {
     if (_adviceModalOpen) return;               // 모달 열림: 캔버스 조작 비활성
-    if (designMode && e.button === 0) return;   // 설계 모드: 좌버튼은 그리기 전용(우버튼만 카메라)
+    // 설계 모드: 좌버튼은 그리기 전용(우버튼만 카메라). 단 ✥ 크기·이동 모드는 빈 곳 좌드래그=카메라 허용.
+    if (designMode && e.button === 0 && !designEditMode) return;
     isDragging = true; isRightDrag = e.button === 2; prevMouse = { x: e.clientX, y: e.clientY };
   });
   renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
@@ -1889,6 +1932,7 @@ window.addEventListener("mousedown", e => {
 // hover 미리보기: 진행중(drawStart!=null)이면 버튼 안 눌러도 끝점을 따라감.
 window.addEventListener("mousemove", e => {
   if (!designMode) return;
+  if (designEditMode && editDragging) { updateEditDrag(e); return; }   // 선택 방 강체 평행이동
   if (rectStart) {   // 직사각형 모드: 반대 모서리 hover → 사각형 미리보기
     const raw = groundMM(e);
     if (raw) updateRectPreview(snapCorner(raw));
@@ -1908,6 +1952,17 @@ window.addEventListener("mouseup", e => {
     if (m <= _CLICK_MAX_PX) { if (rectStart) cancelRect(); else cancelDraw(); return; }
   }
   if (e.button === 2) { _rightDownXY = null; return; }
+  // ✥ 크기·이동 모드: 드래그 종료(이동 확정) / 클릭(선택 토글) — 그리기 로직 안 탐
+  if (e.button === 0 && designMode && designEditMode) {
+    if (editDragging) { finishEditDrag(); return; }
+    if (_editClickXY) {
+      const m = Math.hypot(e.clientX - _editClickXY.x, e.clientY - _editClickXY.y);
+      const idx = _editClickXY.idx;
+      _editClickXY = null;
+      if (m <= _CLICK_MAX_PX) selectEditFace(idx === selectedDesignFace ? -1 : idx);  // 클릭=선택, 드래그=카메라(무시)
+    }
+    return;
+  }
   if (e.button !== 0 || !designMode || !_drawDownXY) return;
   if (_adviceModalOpen) { _drawDownXY = null; return; }  // 모달 열림: 그리기 클릭 무시
   const moved = Math.hypot(e.clientX - _drawDownXY.x, e.clientY - _drawDownXY.y);
@@ -2374,11 +2429,19 @@ function _offOtherSubModes(except) {
     if (b) { b.textContent = "✏️ 방 이름"; b.classList.remove("btn-primary"); b.classList.add("btn-secondary"); }
     const p = document.getElementById("design-name-panel"); if (p) p.style.display = "none";
   }
+  if (except !== "edit" && designEditMode) {
+    designEditMode = false; editDragging = false;
+    _editDragBase = null; _editDragEnds = null; _editClickXY = null;
+    const b = document.getElementById("btn-edit-mode");
+    if (b) { b.textContent = "✥ 크기·이동"; b.classList.remove("btn-primary"); b.classList.add("btn-secondary"); }
+    const p = document.getElementById("design-edit-panel"); if (p) p.style.display = "none";
+  }
 }
 
 // 고정 모드 UI를 OFF 상태로 초기화 (DOM만 — designGroup 없을 때도 안전)
 function resetFixModeUI() {
   designFixMode = false; designRectMode = false; designNameMode = false; selectedDesignFace = -1;
+  designEditMode = false; editDragging = false; _editDragBase = null; _editDragEnds = null; _editClickXY = null;
   rectStart = null;
   const btn = document.getElementById("btn-fix-mode");
   if (btn) { btn.textContent = "🔒 고정 방 지정"; btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary"); }
@@ -2393,6 +2456,10 @@ function resetFixModeUI() {
   if (nb) { nb.textContent = "✏️ 방 이름"; nb.classList.remove("btn-primary"); nb.classList.add("btn-secondary"); }
   const np = document.getElementById("design-name-panel");
   if (np) np.style.display = "none";
+  const eb = document.getElementById("btn-edit-mode");
+  if (eb) { eb.textContent = "✥ 크기·이동"; eb.classList.remove("btn-primary"); eb.classList.add("btn-secondary"); }
+  const ep = document.getElementById("design-edit-panel");
+  if (ep) ep.style.display = "none";
   renderFixedList();
 }
 
@@ -2458,6 +2525,26 @@ function setNameMode(on) {
                   "방 이름 모드를 종료했습니다.", "info");
 }
 
+// ✥ 크기·이동 서브모드 토글
+function setEditMode(on) {
+  if (on) _offOtherSubModes("edit");
+  designEditMode = on;
+  editDragging = false; _editDragBase = null; _editDragEnds = null; _editClickXY = null;
+  selectedDesignFace = -1;
+  const btn = document.getElementById("btn-edit-mode");
+  const panel = document.getElementById("design-edit-panel");
+  if (btn) {
+    btn.textContent = on ? "✥ 크기·이동 종료" : "✥ 크기·이동";
+    btn.classList.toggle("btn-primary", on);
+    btn.classList.toggle("btn-secondary", !on);
+  }
+  if (panel) panel.style.display = on ? "block" : "none";
+  refreshEditPanel();
+  renderDesignRooms();
+  showStatus(on ? "✥ 크기·이동 모드 — 방을 클릭해 선택하고 드래그로 이동하거나 크기를 바꾸세요." :
+                  "크기·이동 모드를 종료했습니다.", "info");
+}
+
 // 이름 모드에서 면 선택 (raycast 결과 faceIdx) — 이름 패널 채움
 function selectNameFace(idx) {
   selectedDesignFace = idx;
@@ -2500,6 +2587,171 @@ function applyDesignRoomName() {
   renderDesignWalls(); renderDesignRooms();
   updateDesignActions();
   showStatus(`✏️ "${name}" 이름을 지정했습니다.`, "ok");
+}
+
+// ── ✥ 크기·이동 모드 ────────────────────────────────────────────────────────
+const _EDIT_TOL = 60;   // 끝점 ↔ 방 정점 일치 허용 오차(mm). _NODE_TOL(50)보다 살짝 넉넉.
+
+// 점이 poly의 어느 정점과 tol 내 일치하면 true (끝점이 방의 정점인지 판정)
+function _isRoomVertex(p, poly) {
+  for (const v of poly) if (Math.hypot(p[0] - v[0], p[1] - v[1]) <= _EDIT_TOL) return true;
+  return false;
+}
+
+// 변경 후 recompute로 새로 생긴 면 중 기준점(BL 또는 centroid)에 가장 가까운 면을 재선택
+function _reselectFaceNear(ref) {
+  let bi = -1, bd = Infinity;
+  for (let i = 0; i < designRooms.length; i++) {
+    const poly = designRooms[i].poly;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    const c = polyCentroid(poly);
+    // BL·centroid 둘 중 더 가까운 것으로 — 호출자가 기준점만 주면 됨
+    const dBL = Math.hypot(ref[0] - x0, ref[1] - y0);
+    const dC = Math.hypot(ref[0] - c[0], ref[1] - c[1]);
+    const d = Math.min(dBL, dC);
+    if (d < bd) { bd = d; bi = i; }
+  }
+  selectedDesignFace = bi;
+}
+
+// 패널 갱신 — 선택 방 W/H prefill, 비직사각이면 크기 입력 비활성(이동만)
+function refreshEditPanel() {
+  const panel = document.getElementById("design-edit-panel");
+  const wIn = document.getElementById("edit-w-input");
+  const hIn = document.getElementById("edit-h-input");
+  const ap = document.getElementById("btn-apply-size");
+  const info = document.getElementById("edit-sel-info");
+  const note = document.getElementById("edit-rect-note");
+  if (!panel) return;
+  const rm = (selectedDesignFace >= 0) ? designRooms[selectedDesignFace] : null;
+  if (!rm) {
+    if (info) info.textContent = "방을 클릭해 선택하세요.";
+    if (wIn) { wIn.value = ""; wIn.disabled = true; }
+    if (hIn) { hIn.value = ""; hIn.disabled = true; }
+    if (ap) ap.disabled = true;
+    if (note) note.style.display = "none";
+    return;
+  }
+  if (rm.locked) {
+    if (info) info.textContent = `🔒 ${rm.name || "고정"} (${rm.area_m2}㎡) — 잠긴 방은 크기 변경 불가(고정 해제 후).`;
+    if (wIn) { wIn.value = ""; wIn.disabled = true; }
+    if (hIn) { hIn.value = ""; hIn.disabled = true; }
+    if (ap) ap.disabled = true;
+    if (note) note.style.display = "none";
+    return;
+  }
+  const d = roomDims(rm.poly, rm.area_m2);
+  if (info) info.textContent = `${rm.name || "이름없음"} (${rm.area_m2}㎡) — 드래그로 이동 / 숫자로 크기 변경`;
+  if (wIn) { wIn.value = Math.round(d.W); wIn.disabled = !d.isRect; }
+  if (hIn) { hIn.value = Math.round(d.H); hIn.disabled = !d.isRect; }
+  if (ap) ap.disabled = !d.isRect;
+  if (note) note.style.display = d.isRect ? "none" : "block";
+}
+
+// edit 모드에서 면 선택
+function selectEditFace(idx) {
+  selectedDesignFace = idx;
+  renderDesignRooms();
+  refreshEditPanel();
+  if (idx >= 0 && designRooms[idx])
+    showStatus(`면 선택됨 (${designRooms[idx].area_m2}㎡) — 드래그로 이동하거나 크기를 바꾸세요.`, "info");
+}
+
+// 크기 적용 — BL(min x,min y) 고정, 우변=x0+W·상변=y0+H. 선택 방 정점에 닿는 끝점만 변환.
+function applyRoomSize() {
+  if (selectedDesignFace < 0 || !designRooms[selectedDesignFace]) {
+    showStatus("먼저 크기 바꿀 방을 클릭하세요.", "error"); return;
+  }
+  const rm = designRooms[selectedDesignFace];
+  if (rm.locked) { showStatus("잠긴 방은 크기 변경 불가(고정 해제 후).", "info"); return; }
+  const d = roomDims(rm.poly, rm.area_m2);
+  if (!d.isRect) { showStatus("직사각형 방만 크기 변경 가능합니다(이동은 가능).", "info"); return; }
+  const W = parseFloat(document.getElementById("edit-w-input").value);
+  const H = parseFloat(document.getElementById("edit-h-input").value);
+  if (!(W >= _DRAW_MIN_MM) || !(H >= _DRAW_MIN_MM)) {
+    showStatus(`가로·세로는 ${_DRAW_MIN_MM}mm 이상이어야 합니다.`, "error"); return;
+  }
+  const poly = rm.poly;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  if (Math.abs((x1 - x0) - W) < 1 && Math.abs((y1 - y0) - H) < 1) {
+    showStatus("크기 변화가 없습니다.", "info"); return;
+  }
+  designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+  if (designHistory.length > 50) designHistory.shift();
+  // 선택 방 정점에 닿는 끝점만: 우변(x≈x1)→x0+W, 상변(y≈y1)→y0+H. 좌·하변 고정.
+  for (const w of designWalls) {
+    for (const end of ["a", "b"]) {
+      const p = w[end];
+      if (!_isRoomVertex(p, poly)) continue;
+      if (Math.abs(p[0] - x1) < _EDIT_TOL) p[0] = x0 + W;
+      if (Math.abs(p[1] - y1) < _EDIT_TOL) p[1] = y0 + H;
+    }
+  }
+  dedupDesignWalls();
+  recomputeDesignRooms();
+  _reselectFaceNear([x0, y0]);   // BL 고정 → BL 근접 재선택
+  renderDesignWalls(); renderDesignRooms();
+  refreshEditPanel(); updateDesignActions();
+  showStatus(`크기 변경: ${(W / 1000).toFixed(2)}m × ${(H / 1000).toFixed(2)}m.`, "ok");
+}
+
+// 드래그 이동 시작 — designWalls 깊은복사 + 옮길 끝점(선택 방 정점) 기록
+function beginEditDrag(e) {
+  if (selectedDesignFace < 0 || !designRooms[selectedDesignFace]) return;
+  const start = groundMM(e);
+  if (!start) return;
+  const poly = designRooms[selectedDesignFace].poly;
+  _editDragBase = designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() }));
+  _editDragEnds = [];
+  for (let wi = 0; wi < designWalls.length; wi++) {
+    for (const end of ["a", "b"]) {
+      const p = designWalls[wi][end];
+      if (_isRoomVertex(p, poly)) _editDragEnds.push({ wi, end, x0: p[0], y0: p[1] });
+    }
+  }
+  _editDragStartMM = start;
+  _editDragCentroid0 = polyCentroid(poly);   // 이동 후 재선택 추적용
+  editDragging = true;
+}
+
+// 드래그 이동 라이브 — delta(100mm 격자 스냅) 강체 평행이동 후 recompute/render
+function updateEditDrag(e) {
+  if (!editDragging || !_editDragEnds) return;
+  const cur = groundMM(e);
+  if (!cur) return;
+  let dx = cur[0] - _editDragStartMM[0], dy = cur[1] - _editDragStartMM[1];
+  dx = Math.round(dx / 100) * 100; dy = Math.round(dy / 100) * 100;
+  for (const r of _editDragEnds) {
+    designWalls[r.wi][r.end][0] = r.x0 + dx;
+    designWalls[r.wi][r.end][1] = r.y0 + dy;
+  }
+  recomputeDesignRooms();
+  _reselectFaceNear([_editDragCentroid0[0] + dx, _editDragCentroid0[1] + dy]);  // 옮긴 centroid 추적
+  renderDesignWalls(); renderDesignRooms();
+}
+
+// 드래그 이동 확정 — 시작 전 스냅샷을 undo 스택에 push, centroid로 재선택
+function finishEditDrag() {
+  editDragging = false;
+  if (!_editDragEnds) { _editDragBase = null; _editDragStartMM = null; _editDragCentroid0 = null; return; }
+  const r0 = _editDragEnds[0];
+  const fdx = designWalls[r0.wi][r0.end][0] - r0.x0;
+  const fdy = designWalls[r0.wi][r0.end][1] - r0.y0;
+  const moved = Math.abs(fdx) > 0.5 || Math.abs(fdy) > 0.5;
+  if (moved && _editDragBase) {
+    designHistory.push(_editDragBase);   // 시작 전 상태 = undo 1단위
+    if (designHistory.length > 50) designHistory.shift();
+  }
+  const c0 = _editDragCentroid0;
+  _editDragBase = null; _editDragEnds = null; _editDragStartMM = null; _editDragCentroid0 = null;
+  recomputeDesignRooms();
+  if (!moved) { selectEditFace(-1); return; }   // 선택 방 위 탭(이동 없음) = 선택 해제(토글)
+  if (c0) _reselectFaceNear([c0[0] + fdx, c0[1] + fdy]);   // 이동된 방을 centroid로 재선택
+  renderDesignWalls(); renderDesignRooms();
+  refreshEditPanel(); updateDesignActions();
+  showStatus("방을 이동했습니다.", "ok");
 }
 
 // 고정 모드에서 면 선택 (raycast 결과 faceIdx)
@@ -2651,6 +2903,8 @@ function exitDesignMode() {
   designBoundary = null; designWalls = []; designRooms = []; designHistory = []; designRoomNames = [];
   designFixedRooms = []; selectedDesignFace = -1; designFixMode = false;
   designRectMode = false; designNameMode = false; rectStart = null; rectPreview = null; rectSizeLabel = null;
+  designEditMode = false; editDragging = false; _editDragBase = null; _editDragEnds = null;
+  _editDragStartMM = null; _editDragCentroid0 = null; _editClickXY = null;
   designUnit = null; drawStart = null; designDrawing = false;
   // 원본 레이어 복귀
   roomTiles.forEach(t => t.visible = true);
@@ -2664,6 +2918,7 @@ function undoDesignWall() {
   if (!designHistory.length) { showStatus("되돌릴 벽이 없습니다.", "info"); return; }
   designWalls = designHistory.pop();
   recomputeDesignRooms(); renderDesignWalls(); renderDesignRooms();
+  if (designEditMode) { selectedDesignFace = -1; refreshEditPanel(); }   // edit-가드: stale 선택 정리
   updateDesignActions();
   showStatus("↩️ 직전 벽을 되돌렸습니다.", "ok");
 }
@@ -3153,6 +3408,10 @@ document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPd
 // ▭ 직사각형 방 / ✏️ 방 이름 / 🔒 고정 방 (서브모드 3개 상호배타)
 document.getElementById("btn-rect-mode").addEventListener("click", () => setRectMode(!designRectMode));
 document.getElementById("btn-name-mode").addEventListener("click", () => setNameMode(!designNameMode));
+document.getElementById("btn-edit-mode").addEventListener("click", () => setEditMode(!designEditMode));
+document.getElementById("btn-apply-size").addEventListener("click", applyRoomSize);
+["edit-w-input", "edit-h-input"].forEach(id =>
+  document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); applyRoomSize(); } }));
 document.getElementById("btn-apply-name").addEventListener("click", applyDesignRoomName);
 document.getElementById("design-name-select").addEventListener("change", e => {
   if (e.target.value) document.getElementById("design-name-input").value = e.target.value;

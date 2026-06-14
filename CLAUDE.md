@@ -846,6 +846,38 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         design_advice) 전부 그린.
       ③(JJ 수동·필수) 직사각형 방 그리기→**가로×세로·면적 라벨**·침실 7㎡/2.4m **미달 ⚠️**·충족 정상·욕실(3㎡/1.5m)·
         거실(12㎡/3.3m)·주방(1.8m) 확인·현관/다용도 검사 안 함·**직사각형 모드 규격 가이드표**·L자 bbox 근사(~). **오피스텔·빌라**. 통과 전 미완료.
+- [x] **방 크기 숫자 변경 + 드래그 이동 — 경고 뜬 방을 그 자리에서 고침**(규격 ⚠️ 뜬 방을 지우고
+      다시 그릴 필요 없이 크기를 숫자로 바꾸고 위치를 드래그로 옮겨 경고를 없앰). 신규 서브모드 ✥ 크기·이동.
+      ★**데이터 모델 핵심**: 방은 저장된 사각형이 아니라 `planarFaces(외곽+designWalls)`가 매번 계산하는 **파생 면**.
+        → 크기/이동 = **그 방 폴리곤 정점과 일치(tol 60mm)하는 designWall 끝점만 변환**하는 한 메커니즘으로 통일.
+        변경 후 recompute가 면을 새로 만들어 인덱스가 바뀌므로 `_reselectFaceNear(기준점)`로 재선택.
+      **신규 서브모드 `designEditMode`**(rect/name/fix와 상호배타 — `_offOtherSubModes`에 edit 분기): 선택은 기존
+        `selectedDesignFace` 재사용(금색 하이라이트 공짜), `_pickDesignFaceIdx` 재사용, `selectEditFace`가
+        `design-edit-panel`에 현재 W/H(roomDims) prefill. 비직사각이면 W/H 입력 disable+"비직사각은 이동만"(이동은 가능).
+      ①**크기 적용**(`applyRoomSize`): designHistory.push(깊은복사)=undo 1단위 → **BL(min x,min y) 고정**,
+        우변(x≈x1)→x0+W·상변(y≈y1)→y0+H, **선택 방 정점에 닿는 끝점만**(`_isRoomVertex`) 변환 → dedup →
+        recompute → **BL 근접 재선택** → render. 100mm 이상·변화 있을 때만.
+      ②**드래그 이동**(카메라 충돌 = ★3게이트 분리): (a)**capture mousedown** — 좌다운이 선택 방 위면
+        `beginEditDrag`+`stopImmediatePropagation`+`preventDefault`(카메라·선택 차단), 그 외엔 통과(=orbit이 카메라).
+        (b)**orbit mousedown** — `designMode && button0 && !designEditMode`면 return(edit 모드만 빈 곳 좌드래그 카메라 허용).
+        (c)**window mousemove** — `editDragging`이면 delta(100mm 격자 스냅) 강체 평행이동 라이브(recompute+센트로이드 추적 재선택).
+        **window mouseup** edit 분기: editDragging이면 `finishEditDrag`(시작 전 스냅샷 push=undo 1단위, **이동 없으면 선택
+        해제=탭 토글**, 이동 있으면 centroid 재선택), 아니면 ≤5px=클릭 선택 토글/>5px=카메라(무시).
+      ③**규격 경고 실시간**: 크기/이동 모두 recompute 경유라 `renderDesignRooms` 라벨이 `checkRoomSpec`로 자동 갱신(⚠️ 붙고/사라짐).
+      ④**undo**: designHistory 재사용. `undoDesignWall`에 **edit-가드 1줄**(edit 모드일 때만 선택 정리+refreshEditPanel) — 타 모드 무영향.
+      ⚠️ **공유 벽 한계**: 끝점 변환은 선택 방 정점에 닿는 벽만 옮김 → 옆 방과 **변 공유** 시 공유 정점이 함께 이동
+        (겹침/빈틈 가능). 고립 방(주 케이스: 새로 그린 작은 침실)은 깔끔. 패널에 "옆 방과 붙어 있으면 공유 벽이 함께
+        움직입니다" 안내. **비직사각 방은 크기변경 불가**(이동만). ⚠️ **비정형(ㄱ자) 외곽은 깨끗한 직사각 방을 그릴
+        clear 영역이 작음**(A세대 최대 2.8m 정사각) — 외곽 노치가 사각형 내부를 가로지르면 면이 잘려 isRect=false.
+      무수정: 직사각형 그리기/이름/클릭클릭/고정방/조언·존/규격피드백/autosave/묶기 localStorage/내보내기/renderToBe/
+        recomputeDesignRooms/planarFaces/beforeunload/generate-layout/partition-layout/백엔드. 삽입=capture mousedown·orbit
+        게이트·window mousemove·window mouseup·`_offOtherSubModes`/`resetFixModeUI`/`exitDesignMode` 리셋·undo 가드 1줄.
+      검증: ①(자동) `_verify_editroom.py`(빌라 page3 A세대, **실제 클릭/드래그**) — 2×2 침실 그려 이름→⚠️·edit 선택 W/H
+        prefill≈2000·**2.8×2.8 적용→7.84㎡·BL 불변·⚠️ 사라짐**·Ctrl+Z→4㎡·⚠️ 복귀·**선택 방 드래그 이동(centroid 2217mm
+        이동·면적 보존·카메라이동 0.00000)**·**빈 곳 좌드래그=카메라 회전 29.8·우드래그=pan 1.7**·탭 토글·에러0. 회귀 8종
+        (rectroom/clickdraw/fixedroom/specfeedback/zones/genlayout/export/autosave) 전부 그린.
+      ②(JJ 수동·필수) 작은 침실 ⚠️→가로·세로 숫자로 키워 ⚠️ 사라짐→방 드래그 이동→빈 곳 좌드래그 카메라 회전·우드래그
+        pan→undo. **빌라**(+오피스텔 있으면). 통과 전 미완료.
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)
