@@ -473,26 +473,16 @@
       </div>
     </div>
 
-    <div>
-      <div class="section-label">🧠 AI 배치 조언</div>
-      <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
-        <span style="font-size:11px; color:#666; white-space:nowrap;">도면 위쪽 방위</span>
-        <select id="orientation-select" style="flex:1; background:#1a1a22; border:1px solid #2a2a35; border-radius:6px; padding:5px 8px; color:#ddd; font-size:11px; outline:none;">
-          <option value="모름">모름</option>
-          <option value="북">북쪽</option>
-          <option value="남">남쪽</option>
-          <option value="동">동쪽</option>
-          <option value="서">서쪽</option>
-        </select>
-      </div>
-      <textarea id="advice-input" placeholder="예: 안방을 남향으로 옮기면 어때? / 화장실 위치가 동선상 비효율적인데 어디가 나을까?" disabled></textarea>
-      <div class="advice-examples">
-        <span class="advice-chip">안방을 남향으로 옮기면 어때?</span>
-        <span class="advice-chip">화장실 위치가 동선상 비효율적인데 어디가 나을까?</span>
-        <span class="advice-chip">주방과 거실 배치를 개선하려면?</span>
-      </div>
-      <button id="btn-advice" disabled>💬 AI에게 조언 요청</button>
-      <div id="advice-response"></div>
+    <!-- AI 배치 조언 섹션 제거 — 설계 모드 안(design-actions)에서만 노출 -->
+    <div style="display:none" aria-hidden="true">
+      <select id="orientation-select">
+        <option value="모름">모름</option>
+        <option value="북">북쪽</option>
+        <option value="남">남쪽</option>
+        <option value="동">동쪽</option>
+        <option value="서">서쪽</option>
+      </select>
+      <textarea id="advice-input"></textarea>
     </div>
 
     <div>
@@ -612,6 +602,8 @@
         <!-- 트렌드/시장 정보 — 설계 조언 요청 시 반영 -->
         <textarea id="design-trend-input" placeholder="buji-terminal 등 시장/트렌드 정보 (선택)"
           style="width:100%; box-sizing:border-box; min-height:46px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
+        <button id="btn-advice" disabled style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none; width:100%;">💬 AI에게 조언 요청</button>
+        <div id="advice-response"></div>
       </div>
       <div class="edit-hint" id="design-hint" style="display:none;">
         내벽이 사라진 빈 외곽에 <b>시작점 클릭 → 끝점 클릭</b>으로 벽을 그으세요(드래그 아님).
@@ -883,8 +875,6 @@ async function parsePdf() {
     ["btn-asis","btn-redesign","btn-dxf"].forEach(id =>
       document.getElementById(id).disabled = false);
 
-    document.getElementById("advice-input").disabled = false;
-    document.getElementById("btn-advice").disabled = false;
     document.getElementById("btn-unit-mode").disabled = false;
     document.getElementById("btn-design-mode").disabled = false;
     updateUnitCounts();
@@ -2726,6 +2716,8 @@ function updateDesignActions() {
   if (wrap) wrap.style.display = designMode ? "flex" : "none";
   const gl = document.getElementById("btn-generate-layout");
   if (gl) gl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
+  const ba = document.getElementById("btn-advice");
+  if (ba) ba.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const u = document.getElementById("btn-undo-design");
   const cl = document.getElementById("btn-clear-design");
   const rv = document.getElementById("btn-revert-design");
@@ -2969,67 +2961,9 @@ document.getElementById("room-name-input").addEventListener("keydown", e => {
 });
 document.getElementById("btn-cancel-room-edit").addEventListener("click", () => selectRoom(null));
 
-// ── AI 배치 조언 ──────────────────────────────────────────────────────────
-document.querySelectorAll(".advice-chip").forEach(chip => {
-  chip.addEventListener("click", () => {
-    document.getElementById("advice-input").value = chip.textContent;
-    document.getElementById("advice-input").focus();
-  });
-});
-
-async function requestAdvice() {
-  if (designMode) { requestDesignAdvice(); return; }   // 설계 모드에선 설계 맥락 조언으로 위임
-  if (!parsedData) { showStatus("먼저 PDF를 업로드/파싱하세요.", "error"); return; }
-  const question = document.getElementById("advice-input").value.trim();
-  if (!question) { showStatus("질문을 입력하세요.", "error"); return; }
-
-  const btn = document.getElementById("btn-advice");
-  const box = document.getElementById("advice-response");
-  btn.disabled = true;
-  box.style.display = "block";
-  box.innerHTML = '<span class="advice-loading">🤔 도면 배치를 분석해 조언을 작성 중...</span>';
-
-  // 컨텍스트용으로 방 데이터(이름·면적·위치) + 외곽 전송
-  const rooms = parsedData.rooms.map(r => ({
-    id: r.id, names: r.names || [], area_m2: r.area_m2, polygon_mm: r.polygon_mm,
-    unit: r.unit || null,
-  }));
-
-  const orientation = document.getElementById("orientation-select").value;
-  try {
-    const res = await fetch(`${API}/api/ai-advice`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        rooms,
-        building_outline_mm: parsedData.building_outline_mm,
-        outline_area_m2: parsedData.outline_area_m2,
-        building_orientation: orientation,
-      }),
-    });
-    if (!res.ok) { throw new Error((await res.text()).slice(0, 300)); }
-    const data = await res.json();
-    box.textContent = data.answer || "(응답 없음)";
-    showStatus("✅ AI 배치 조언을 받았습니다.", "ok");
-  } catch (err) {
-    box.innerHTML = "";
-    box.style.display = "none";
-    showStatus("❌ AI 조언 실패: " + err.message, "error");
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-document.getElementById("btn-advice").addEventListener("click", () => {
-  if (designMode) requestDesignAdvice(); else requestAdvice();
-});
-document.getElementById("advice-input").addEventListener("keydown", e => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault();
-    if (designMode) requestDesignAdvice(); else requestAdvice();
-  }
-});
+// ── AI 조언 — 설계 모드 전용 (btn-advice는 design-actions 안에 있음) ────────
+// requestAdvice()는 /api/ai-advice 경로 — 백엔드는 보존, 프런트 호출 경로만 제거.
+document.getElementById("btn-advice").addEventListener("click", requestDesignAdvice);
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────
 function showStatus(msg, type) {
