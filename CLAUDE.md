@@ -814,6 +814,38 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         위반·거부 로그. 통과 전 미완료.
       ⚠️ 한계: 내접+분할은 정형 전용(측정). ㄱ자는 거실 정도만+큰 잔여(수동). 칸은 격자스냅 후 미세 오차 가능
         (다운스트림 클립이 흡수). AI 이름 배정(c2)은 현재 미적용(결정적 배정만, 키 불필요) — 필요 시 다음 증분.
+- [측정·폐기] **A-1 비정형 폴리곤 규격 분할 프로토타입**(`_proto_partition_a1.py`) — 본 구현 안 함.
+      비정형 외곽 자체를 규격 맞춰 분할(non-convex rectangular partitioning) 가능성만 측정. 3방식(직사각형
+      분해+BSP / inscribe-and-carve / 최대내접 반복)을 실제 A세대(채움0.46)·합성 직사각(1.0)·합성 완만ㄱ자(0.89)에
+      적용. **결과: 성공 여부는 채움비율에 직결** — 정형(1.0) a방식 위반0·채움99%, 완만ㄱ자(0.89) a방식 **위반0**·
+      채움76%, **A세대 severe ㄱ자(0.46)는 전 방식 위반4~5(주로 채광)** → A-1로도 불가. a(분해+BSP)가 최선이나
+      실효는 채움~0.85↑(정형~완만). severe ㄱ자는 zones 가이드+수동이 현실. → **A-1 본 구현 보류**(수동 강화로 전환).
+- [x] **수동 드로잉 규격 피드백 — 치수 상시 표시 + 이름별 규격 경고 + 가이드**(자동배치는 각진 세대서 불가
+      확정 → JJ 직접 그리기가 현실. 그릴 때 실제 가로×세로·사람이 살 수 있는 크기인지 알게 함).
+      **규격 단일 소스 `GET /api/arch-spec`**(순수 조회, 자동배치 무관): `{specs:_ARCH, categories:[{cat,keywords}]}`
+        반환. `_room_category`를 **신규 `_CATEGORY_KEYWORDS` 상수에서 파생**하도록 리팩터(동작 동일, 진짜 단일소스).
+        프런트는 설계 진입 시 1회 fetch, **실패 시 baked-in 폴백**(현재 _ARCH값) → 오프라인 안전.
+      **프런트**: `roomCategoryOf(name)`(백엔드 매칭 순서 그대로 JS 재현, **주방⊃방 먼저**)·`checkRoomSpec(name,W,H,area)`
+        (카테고리 spec 있으면 **short=min(W,H)**로 폭·면적 비교→미달 항목 배열, 없거나 spec 0이면 빈)·`roomDims(poly,area)`
+        (bbox W·H + area/bbox≥0.95면 isRect 정확/미만 근사). **거실=짧은변(최소변) 기준**(사용자 명시).
+      **renderDesignRooms 라벨 확장**(텍스트만, makeLabel·recompute 시그니처 불변): `[🔒/⚠️] 이름` → `W × H m`
+        (비직사각 `~W × H (bbox)`) → `N㎡` → 미달 시 `폭 2.1<2.4m · 면적 6.3<7㎡`. 우선순위 잠금>경고, 잠긴 방 검사 안 함.
+      **규격 가이드** `design-spec-guide` div: setRectMode(true) 표시·(false)/_offOtherSubModes/resetFixModeUI 숨김.
+        _archSpec에서 "침실 폭2.4m·7㎡ / 욕실 1.5×2.0m·3㎡ / 거실 최소변3.3m·12㎡ / 주방 폭1.8m" + bbox 근사 안내.
+      ⚠️ **거실 변 기준 의도적 비동기**: 수동 피드백은 **짧은변≥3300**(사용자 명시 '최소변'), 백엔드 `_validate_layout`
+        (자동배치)은 거실을 **긴변**으로 검사하는 quirk. 둘 다 같은 `_ARCH` 숫자(3300)를 쓰되 거실 변 선택만 다름.
+        자동배치 백엔드는 안 건드림(의도적). bbox 근사: 비직사각 방 치수는 bbox 과대평가(면적은 shoelace 정확).
+      무수정: 직사각형 그리기/이름/클릭클릭/고정방/조언·존/undo/autosave/묶기 localStorage/내보내기/renderToBe/
+        recomputeDesignRooms/beforeunload/partition-layout/generate-layout. 변경=라벨 텍스트 확장+신규 헬퍼+arch-spec
+        조회/캐시+가이드 토글. `_room_category`는 동작동일 리팩터(파생).
+      검증: ①(자동) `_verify_archspec_backend.py` 17/17 — arch-spec==_ARCH 숫자 드리프트0·categories==_CATEGORY_KEYWORDS
+        순서·프런트 roomCategoryOf 재현==백엔드(대표 27이름)·주방⊃방·검사제외(현관/다용도/발코니/기타) 0. ②(자동)
+        `_verify_specfeedback.py` — archSpec 로드·checkRoomSpec(침실 폭2.1/면적6.3 미달·충족·욕실/거실/주방 경계·현관/
+        다용도/이름없음 제외)·roomDims(합성 직사각 isRect True·L자 False)·가이드 토글 표시/숨김·실제 직사각 그림→방·치수·
+        라벨 sprite 생성·에러0. 회귀 9종(rectroom/clickdraw/fixedroom/zones/genlayout/partition_backend/export/autosave/
+        design_advice) 전부 그린.
+      ③(JJ 수동·필수) 직사각형 방 그리기→**가로×세로·면적 라벨**·침실 7㎡/2.4m **미달 ⚠️**·충족 정상·욕실(3㎡/1.5m)·
+        거실(12㎡/3.3m)·주방(1.8m) 확인·현관/다용도 검사 안 함·**직사각형 모드 규격 가이드표**·L자 bbox 근사(~). **오피스텔·빌라**. 통과 전 미완료.
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)

@@ -574,6 +574,8 @@
           <button class="btn-secondary" id="btn-rect-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">▭ 직사각형 방</button>
           <button class="btn-secondary" id="btn-name-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">✏️ 방 이름</button>
         </div>
+        <!-- 규격 가이드 (직사각형 모드일 때만 표시) -->
+        <div id="design-spec-guide" style="display:none; padding:8px; background:#13202a; border:1px solid #1e3a4a; border-radius:8px; font-size:11px; color:#9fb8c8; line-height:1.6;"></div>
         <!-- 방 이름 붙이기 패널 -->
         <div id="design-name-panel" style="display:none; padding:8px; background:#161a22; border-radius:8px;">
           <div style="font-size:11px; color:#9aa; margin-bottom:6px;">닫힌 방을 클릭해 선택하고 이름을 정하세요</div>
@@ -766,6 +768,31 @@ let _designRoomTiles = [];     // 방 타일 메시(raycast용, userData.faceIdx
 let designZones = [];          // AI 설계 조언 '대략적 위치 존' [{name, poly(mm), area_m2}] — 가이드(휘발)
 let _designZoneMeshes = [];    // 존 메시(반투명 면+점선+라벨) — 방/벽과 별개 레이어
 let designZonesVisible = true; // 존 표시 토글 상태
+// 건축 규격 — GET /api/arch-spec(백엔드 _ARCH·_room_category 단일 소스)에서 fetch.
+// fetch 실패 시 baked-in 폴백(현재 _ARCH값과 일치). 수동 드로잉 규격 피드백용.
+// ⚠️ 거실은 '최소변(짧은변)' 기준(사용자 명시) — 백엔드 _validate_layout은 자동배치용으로 긴변 quirk(의도적 비동기).
+let _archSpec = {
+  specs: {
+    bedroom: { min_w: 2400, min_area: 7.0,  daylight: true },
+    bath:    { min_w: 1500, min_area: 3.0,  daylight: false },
+    kitchen: { min_w: 1800, min_area: 0.0,  daylight: false },
+    living:  { min_w: 3300, min_area: 12.0, daylight: true },
+    entry:   { min_w: 0, min_area: 0.0, daylight: false },
+    utility: { min_w: 0, min_area: 0.0, daylight: false },
+    balcony: { min_w: 0, min_area: 0.0, daylight: false },
+    other:   { min_w: 0, min_area: 0.0, daylight: false },
+  },
+  categories: [
+    { cat: "kitchen", keywords: ["주방", "부엌"] },
+    { cat: "living",  keywords: ["거실", "LDK", "리빙"] },
+    { cat: "bath",    keywords: ["욕실", "화장실", "세면", "샤워"] },
+    { cat: "utility", keywords: ["다용도", "팬트리", "창고", "드레스", "보일러", "세탁"] },
+    { cat: "entry",   keywords: ["현관"] },
+    { cat: "balcony", keywords: ["발코니", "베란다"] },
+    { cat: "bedroom", keywords: ["침실", "안방", "방"] },
+  ],
+};
+let _archSpecLoaded = false;
 let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
 let designDrawing = false;     // 그리기 진행중 (첫 점 찍힘, 둘째 클릭 대기) = drawStart!=null
 let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm (null=idle)
@@ -2123,6 +2150,68 @@ function renderDesignWalls() {
     designGroup.add(ln); _designWallMeshes.push(ln);
   }
 }
+
+// ── 규격 피드백 (단일 소스 = GET /api/arch-spec, 실패 시 baked-in 폴백) ────────
+async function loadArchSpec() {
+  if (_archSpecLoaded) return;
+  try {
+    const res = await fetch(`${API}/api/arch-spec`);
+    if (res.ok) {
+      const d = await res.json();
+      if (d && d.specs && Array.isArray(d.categories)) _archSpec = d;
+    }
+  } catch (e) { /* 폴백 유지 */ }
+  _archSpecLoaded = true;
+}
+
+// 이름 → 카테고리 (백엔드 _room_category 순서 그대로, 라틴은 대소문자 무관)
+function roomCategoryOf(name) {
+  const nu = (name || "").trim().toUpperCase();
+  if (!nu) return "other";
+  for (const c of _archSpec.categories) {
+    if (c.keywords.some(k => nu.includes(k.toUpperCase()))) return c.cat;
+  }
+  return "other";
+}
+
+// 방 poly bbox → { W, H, isRect } (mm). 면적/bbox≥0.95면 직사각(정확), 미만이면 근사.
+function roomDims(poly, area_m2) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  const W = x1 - x0, H = y1 - y0;
+  const bboxA = (W * H) / 1e6;
+  const isRect = bboxA > 0 && (area_m2 / bboxA) >= 0.95;
+  return { W, H, isRect };
+}
+
+// 이름·치수·면적 → 규격 미달 항목 배열. 카테고리 spec 없거나 0이면 빈 배열(검사 안 함).
+// 폭=짧은변(거실 포함 — 사용자 명시 '최소변'). 면적은 shoelace(정확).
+function checkRoomSpec(name, W, H, area_m2) {
+  const cat = roomCategoryOf(name);
+  const spec = (_archSpec.specs || {})[cat];
+  if (!spec) return [];
+  const short = Math.min(W, H);
+  const out = [];
+  if (spec.min_w && short < spec.min_w - 1)
+    out.push(`폭 ${(short / 1000).toFixed(1)}<${(spec.min_w / 1000).toFixed(1)}m`);
+  if (spec.min_area && area_m2 < spec.min_area - 0.05)
+    out.push(`면적 ${area_m2.toFixed(1)}<${spec.min_area.toFixed(0)}㎡`);
+  return out;
+}
+
+// 직사각형 모드 규격 가이드표 채우기 (_archSpec 기반)
+function renderSpecGuide() {
+  const box = document.getElementById("design-spec-guide");
+  if (!box) return;
+  const s = _archSpec.specs || {};
+  const f = (v) => (v / 1000).toFixed(1);
+  box.innerHTML =
+    `<div style="font-weight:600; color:#bfe0f0; margin-bottom:4px;">📐 최소 규격 (사람이 살 수 있는 크기)</div>` +
+    `침실 폭 ${f(s.bedroom.min_w)}m·${s.bedroom.min_area}㎡ · 욕실 ${f(s.bath.min_w)}×2.0m·${s.bath.min_area}㎡<br>` +
+    `거실 최소변 ${f(s.living.min_w)}m·${s.living.min_area}㎡ · 주방 폭 ${f(s.kitchen.min_w)}m<br>` +
+    `<span style="color:#6f8694;">치수는 그린 직사각형 기준 — 비직사각(L자)은 bbox 근사(~).</span>`;
+}
+
 function renderDesignRooms() {
   for (const m of _designRoomMeshes) { designGroup.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); }
   _designRoomMeshes = []; _designRoomTiles = [];
@@ -2147,9 +2236,21 @@ function renderDesignRooms() {
       designGroup.add(lin); _designRoomMeshes.push(lin);
     }
     const c = polyCentroid(rm.poly);
-    const txt = rm.locked ? `🔒 ${rm.name || "고정"}\n${rm.area_m2}㎡`
-                          : (rm.name ? `${rm.name}\n${rm.area_m2}㎡` : `${rm.area_m2}㎡`);
-    const label = makeLabel(txt);
+    // 치수: poly bbox에서 가로×세로 (비직사각이면 ~bbox 근사)
+    const d = roomDims(rm.poly, rm.area_m2);
+    const dimTxt = `${d.isRect ? "" : "~"}${(d.W / 1000).toFixed(2)} × ${(d.H / 1000).toFixed(2)} m${d.isRect ? "" : " (bbox)"}`;
+    // 규격 검사 (잠긴 방은 검사 안 함 — 현관 등 보통 spec 없음, 우선순위 잠금>경고)
+    const issues = rm.locked ? [] : checkRoomSpec(rm.name || "", d.W, d.H, rm.area_m2);
+    let head;
+    if (rm.locked) head = `🔒 ${rm.name || "고정"}`;
+    else if (rm.name) head = `${issues.length ? "⚠️ " : ""}${rm.name}`;
+    else head = null;
+    const lines = [];
+    if (head) lines.push(head);
+    lines.push(dimTxt);
+    lines.push(`${rm.area_m2}㎡`);
+    if (issues.length) lines.push(issues.join(" · "));
+    const label = makeLabel(lines.join("\n"));
     label.position.set(c[0] / 1000, 0.6, c[1] / 1000);
     designGroup.add(label); _designRoomMeshes.push(label);
   }
@@ -2265,6 +2366,7 @@ function _offOtherSubModes(except) {
     designRectMode = false;
     const b = document.getElementById("btn-rect-mode");
     if (b) { b.textContent = "▭ 직사각형 방"; b.classList.remove("btn-primary"); b.classList.add("btn-secondary"); }
+    const g = document.getElementById("design-spec-guide"); if (g) g.style.display = "none";
   }
   if (except !== "name" && designNameMode) {
     designNameMode = false;
@@ -2286,6 +2388,7 @@ function resetFixModeUI() {
   if (lb) lb.disabled = true;
   const rb = document.getElementById("btn-rect-mode");
   if (rb) { rb.textContent = "▭ 직사각형 방"; rb.classList.remove("btn-primary"); rb.classList.add("btn-secondary"); }
+  const sg = document.getElementById("design-spec-guide"); if (sg) sg.style.display = "none";
   const nb = document.getElementById("btn-name-mode");
   if (nb) { nb.textContent = "✏️ 방 이름"; nb.classList.remove("btn-primary"); nb.classList.add("btn-secondary"); }
   const np = document.getElementById("design-name-panel");
@@ -2324,6 +2427,12 @@ function setRectMode(on) {
     btn.textContent = on ? "▭ 직사각형 방 종료" : "▭ 직사각형 방";
     btn.classList.toggle("btn-primary", on);
     btn.classList.toggle("btn-secondary", !on);
+  }
+  // 규격 가이드: 직사각형 모드일 때만 표시
+  const guide = document.getElementById("design-spec-guide");
+  if (guide) {
+    if (on) { renderSpecGuide(); guide.style.display = "block"; }
+    else guide.style.display = "none";
   }
   renderDesignRooms();
   showStatus(on ? "▭ 직사각형 방 모드 — 대각선 두 점을 클릭하면 방이 만들어집니다." :
@@ -2444,6 +2553,7 @@ function unlockFixedRoom(i) {
 
 // ── 진입/이탈/undo ─────────────────────────────────────────────────────────
 async function enterDesignMode(unit) {
+  loadArchSpec();   // 규격 기준 1회 fetch (실패 시 baked-in 폴백) — 라벨/가이드 검사용
   let boundary, loadedWalls = [], loadedNames = [], loadedFixed = [];
   // 규칙3: 저장된 설계가 있는데 묶기(방 id 집합)가 바뀌었으면 경고 → 유지/다시시작 선택
   let useSaved = !!unitDesigns[unit];

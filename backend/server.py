@@ -83,6 +83,16 @@ async def parse_pdf_endpoint(file: UploadFile = File(...), page_index: int = 0):
     return JSONResponse(data)
 
 
+@app.get("/api/arch-spec")
+async def arch_spec():
+    """건축 규격 기준(_ARCH) + 이름→카테고리 키워드(_CATEGORY_KEYWORDS)를 그대로 반환.
+    프런트 수동 드로잉 규격 피드백의 단일 소스(숫자·키워드 드리프트 방지). 순수 조회."""
+    return JSONResponse({
+        "specs": _ARCH,
+        "categories": [{"cat": cat, "keywords": kws} for cat, kws in _CATEGORY_KEYWORDS],
+    })
+
+
 # ─── AI 배치 조언 (Claude) ──────────────────────────────────────────────────
 
 _ADVICE_SYSTEM = """당신은 한국의 주택 평면 설계·인테리어 배치 전문가입니다.
@@ -461,24 +471,26 @@ _WATER_CATS = ("bath", "kitchen", "utility")   # 물 쓰는 공간(배관 인접
 _CORRIDOR_MIN = 900           # 동선 폭 최소(mm) — 프롬프트만, 자동검증 안 함
 
 
+# 이름→카테고리 매칭 키워드 (순서=우선순위). ★'주방'이 '방'보다 먼저(주방⊃방).
+# _room_category와 GET /api/arch-spec가 같은 소스를 쓰도록 단일 상수로 둔다.
+# 라틴 키워드(LDK)는 대문자 비교(name.upper())로 대소문자 무관. 한글은 upper() 영향 없음.
+_CATEGORY_KEYWORDS = [
+    ("kitchen", ["주방", "부엌"]),
+    ("living",  ["거실", "LDK", "리빙"]),
+    ("bath",    ["욕실", "화장실", "세면", "샤워"]),
+    ("utility", ["다용도", "팬트리", "창고", "드레스", "보일러", "세탁"]),
+    ("entry",   ["현관"]),
+    ("balcony", ["발코니", "베란다"]),
+    ("bedroom", ["침실", "안방", "방"]),
+]
+
+
 def _room_category(name):
-    """방 이름 → 용도 카테고리. ★순서 주의: '주방'은 '방'을 포함하므로 주방을 먼저 매칭."""
-    n = (name or "").strip()
-    nu = n.upper()
-    if any(k in n for k in ("주방", "부엌")):
-        return "kitchen"
-    if ("거실" in n) or ("LDK" in nu) or ("리빙" in n):
-        return "living"
-    if any(k in n for k in ("욕실", "화장실", "세면", "샤워")):
-        return "bath"
-    if any(k in n for k in ("다용도", "팬트리", "창고", "드레스", "보일러", "세탁")):
-        return "utility"
-    if "현관" in n:
-        return "entry"
-    if any(k in n for k in ("발코니", "베란다")):
-        return "balcony"
-    if any(k in n for k in ("침실", "안방", "방")):
-        return "bedroom"
+    """방 이름 → 용도 카테고리. _CATEGORY_KEYWORDS(단일 소스)를 순서대로 매칭."""
+    nu = (name or "").strip().upper()
+    for cat, kws in _CATEGORY_KEYWORDS:
+        if any(k.upper() in nu for k in kws):
+            return cat
     return "other"
 
 
