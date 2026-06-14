@@ -220,7 +220,13 @@ _DESIGN_ADVICE_SYSTEM = """당신은 한국의 주거 평면 설계 전문가입
 - 시장 트렌드: [JJ가 입력한 트렌드/요구]가 있으면 그 내용을 우선 반영.
   없으면 일반 건축 원칙으로만 조언. "N년 트렌드 1위", "요즘 분양 1위", "필수 마케팅 포인트" 같이 시장을 단정하는 표현 금지.
   시장 수치·순위·분양가·유행 평면이 필요하면 "구체적 최신 시장 트렌드(분양가·유행 평면 등)는 실거래 데이터 확인이 필요합니다"라고 정직하게 단서를 달 것.
-- 한국어, 불릿 위주, 간결하게. 핵심 5~7줄 이내."""
+- 한국어, 불릿 위주, 간결하게. 핵심 5~7줄 이내.
+
+[필수] 조언 텍스트를 모두 쓴 뒤, 맨 마지막에 각 방의 '대략적 위치 존'을 아래 형식으로 출력하라.
+- 반드시 ```json 펜스로 감싸고, 그 안에 zones 배열만: {"zones":[{"name":"거실","x":0,"y":0,"w":4000,"h":3500}, ...]}
+- x,y,w,h는 mm. [외곽 폴리곤 좌표] 범위 안에서 각 방의 대략 위치·크기. 100mm 격자 근사.
+- 이 좌표는 '대략값'이며 정밀하지 않아도 된다(JJ가 보고 직접 그리는 방향 가이드). 겹쳐도 되고, 외곽을 살짝 벗어나도 서버가 자른다.
+- 조언에서 언급한 방들(거실·침실·주방·욕실·현관 등)을 zones에 포함하라. 펜스 밖에는 JSON을 두지 마라."""
 
 
 def _classify_shape(boundary):
@@ -354,15 +360,37 @@ async def design_advice(payload: dict):
         from anthropic import Anthropic
         client = Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1200,
+            model="claude-sonnet-4-6", max_tokens=1600,
             system=_DESIGN_ADVICE_SYSTEM,
             messages=[{"role": "user", "content": context}],
         )
-        answer = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        raw_answer = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     except Exception as e:
         raise HTTPException(500, f"설계 조언 생성 실패: {str(e)}")
 
-    return JSONResponse({"answer": answer, "context": context})
+    # 텍스트 조언 + zones JSON 분리. zones는 '대략적 위치 존'(가이드) — 실패해도 조언은 살림.
+    answer, zones = raw_answer, []
+    try:
+        prose, json_str = _split_advice_and_zones(raw_answer)
+        answer = prose or raw_answer        # prose가 비면 원문 폴백(조언은 절대 안 잃음)
+        if json_str:
+            from shapely.geometry import Polygon
+            bpoly = Polygon([(float(x), float(y)) for x, y in boundary])
+            if not bpoly.is_valid:
+                bpoly = bpoly.buffer(0)
+            for c in _clipped_rooms(_parse_zones_json(json_str), bpoly):
+                ring = list(c["poly"].exterior.coords)
+                zones.append({
+                    "name": c["name"],
+                    "poly": [[round(px, 1), round(py, 1)] for px, py in ring],
+                    "area_m2": c["area_m2"],
+                })
+    except Exception as ze:
+        # 존 추출 실패는 조언을 막지 않는다 (graceful degradation)
+        print(f"[design-advice] zones 추출 실패(무시): {ze}")
+        zones = []
+
+    return JSONResponse({"answer": answer, "zones": zones, "context": context})
 
 
 @app.post("/api/unit-boundary")
@@ -860,6 +888,66 @@ def _parse_rooms_json(text):
     if not isinstance(obj, dict):
         return []
     raw = obj.get("rooms") or []
+    out = []
+    for r in raw:
+        try:
+            x, y, w, h = float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"])
+            if w <= 0 or h <= 0:
+                continue
+            name = str(r.get("name") or "").strip() or "방"
+            out.append({"name": name, "x": x, "y": y, "w": w, "h": h})
+        except Exception:
+            continue
+    return out
+
+
+def _split_advice_and_zones(text):
+    """설계 조언 응답(텍스트 + zones JSON 펜스) → (prose, json_str).
+    AI는 불릿 조언 뒤에 ```json {"zones":[...]}``` 블록을 붙인다. prose에는 JSON이
+    남지 않게 떼어내고, JSON 문자열만 따로 반환. 펜스가 없으면 (원문, "")."""
+    import re
+    s = text or ""
+    # 1) ```json ... ``` (또는 ``` ... ```) 펜스 우선
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
+    if m:
+        prose = (s[:m.start()] + s[m.end():]).strip()
+        return prose, m.group(1)
+    # 2) 펜스 없이 "zones"를 포함한 마지막 {...} 블록 (산문 혼합 대비)
+    candidates = list(re.finditer(r"\{[^{}]*\"zones\"[\s\S]*?\}\s*\]?\s*\}", s))
+    if candidates:
+        m = candidates[-1]
+        prose = (s[:m.start()] + s[m.end():]).strip()
+        return prose, m.group(0)
+    # 3) "zones"가 어디엔가 있으면 첫 { 부터 끝까지를 JSON 후보로
+    idx = s.find("\"zones\"")
+    if idx != -1:
+        brace = s.rfind("{", 0, idx)
+        if brace != -1:
+            prose = s[:brace].strip()
+            return prose, s[brace:].strip()
+    return s.strip(), ""
+
+
+def _parse_zones_json(text):
+    """zones JSON → [{name,x,y,w,h}]. _parse_rooms_json과 동일 로직(키만 'zones').
+    펜스/산문혼합/깨짐/w0 robust. 실패 시 [] (조언 텍스트는 별도로 살린다)."""
+    import json, re
+    s = (text or "").strip()
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s).strip()
+    obj = None
+    try:
+        obj = json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except Exception:
+                obj = None
+    if not isinstance(obj, dict):
+        return []
+    raw = obj.get("zones") or []
     out = []
     for r in raw:
         try:

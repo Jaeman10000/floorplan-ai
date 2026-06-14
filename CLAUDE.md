@@ -735,6 +735,45 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         18㎡+트렌드 "4베이/팬트리" → 형상·남향·그린 방·개수·트렌드 모두 반영한 방향성 조언 확인(좌표 단정 없음).
       ④(JJ 수동·필수, 실제 키) A세대(ㄱ자) 방위 남 조언→형상·방위·개수 반영·트렌드 입력 반영·빈 입력 단서·
         벽 안 그려짐 / 방 몇 개 그린 뒤 다시 조언→이어서 조언하는지 / **오피스텔(정형)로도 1회**. 통과 전 미완료.
+      ⚠️ 후속: 조언 모달화(사이드바 텍스트→화면 중앙 모달, Esc/오버레이/× 닫기·복사·다시보기 캐시) +
+        btn-advice/advice-response로 통합(위 `btn-design-advice`/`design-advice-response`는 stale).
+- [x] **설계 조언 '대략적 위치 존' 3D 오버레이 — AI 좌표 부정확 인정, 방향 가이드만**(텍스트 조언이
+      "남쪽 외벽 서쪽 끝 안방"이라 해도 JJ가 3D에서 어딘지 매칭 못 하던 문제 → 대략 위치를 색 존으로 표시.
+      JJ는 존 보고 직사각형 방 도구로 직접 그림. 존=가이드, 실벽·방 아님, designWalls 안 건드림, 저장 안 함 휘발).
+      **백엔드 design-advice 응답 확장**(`{answer, context}`→`{answer, zones, context}`):
+        ①`_DESIGN_ADVICE_SYSTEM`에 "조언 텍스트 뒤 ```json {\"zones\":[{name,x,y,w,h}]}``` 펜스" 규칙 추가
+          (대략값·외곽 범위·100mm 격자, 펜스 밖 JSON 금지). max_tokens 1200→1600.
+        ②`_split_advice_and_zones(text)`→(prose, json_str): ```json 펜스 우선, 없으면 "zones" 포함 {...} 블록
+          분리. **prose에 JSON 안 남김**(모달 깔끔). 펜스/JSON 없으면 (원문, "").
+        ③`_parse_zones_json`=`_parse_rooms_json` 클론(키 'zones', 펜스/산문혼합/깨짐/w0 robust). **기존 함수 무수정.**
+        ④`_clipped_rooms(rects, bpoly)` **재사용**으로 외곽 클립(<1㎡ drop·밖 잘림·MultiPolygon 최대조각)→
+          `zones=[{name, poly:[[x,y]...], area_m2}]`. ★**zones 추출 전체를 try/except**로 감싸 실패해도
+          `zones=[]`, **answer(조언 텍스트)는 절대 안 잃음**(graceful degradation, prose 비면 raw 폴백).
+      **프런트 가이드 레이어**(방 타일·벽과 별개): 전역 `designZones`/`_designZoneMeshes`/`designZonesVisible`.
+        `renderDesignZones()`=흐린 반투명 면(opacity 0.18, **y=0.012**로 방 타일 0.02 아래→JJ 그린 방이 위에
+        보임)+`LineDashedMaterial`+computeLineDistances 점선 테두리+`makeLabel("이름 (대략)")`(y=0.45). **raycast
+        배열(_designRoomTiles)에 안 넣어** 고정/이름 모드 클릭 간섭 0. `recomputeDesignRooms`/`renderDesignRooms`/
+        `renderDesignWalls` **무수정**(각자 자기 배열만 dispose). `toggleDesignZones()`=메시 `.visible` 일괄.
+      **연결**: `requestDesignAdvice` 성공부에 `designZones=data.zones||[]; renderDesignZones()` 몇 줄 + 토글
+        버튼 텍스트 갱신(모달 텍스트·캐시·복사·다시보기 **무수정**). 조언 카드에 `btn-zone-toggle`("🗺️ 위치 존
+        표시/숨김", designZones 있을 때만 활성=updateDesignActions 1줄)+"점선=AI 추정 대략 위치, 정확 X" 안내.
+        enter/exitDesignMode에 존 리셋(휘발). `saveDesign`/`unitDesigns`/`renderToBe` 무수정(To-Be에 존 안 들어감).
+      무수정 확인: 직사각형방/이름/클릭클릭/고정방/AI생성(generate-layout)/undo/clear/autosave/묶기 localStorage/
+        내보내기/조언 모달 텍스트·캐싱·복사/renderToBe/beforeunload + 기존 백엔드(_parse_rooms_json·_clipped_rooms
+        시그니처·generate_layout). 변경=신규 추가 + 기존 라인 삽입 4곳(design_advice 응답·requestDesignAdvice 성공부·
+        updateDesignActions 1줄·enter/exit 리셋).
+      검증: ①(자동) `_verify_zones_backend.py` 24/24 — `_split_advice_and_zones`(펜스/산문혼합 분리·prose에 JSON
+        안 남음·JSON 없을 때 원문 보존)·`_parse_zones_json`(정상/펜스/산문/깨짐→[]/w0 제외)·`_clipped_rooms`
+        (외곽 안 생존·삐짐 클립·<1㎡ drop·완전 밖 drop)·**★graceful(깨진 zones여도 prose 보존·zones=[])**.
+        ②(자동) `_verify_zones.py`(빌라 A세대, **실제 클릭**+page.route 목) — 모달 텍스트+designZones 2개·메시
+        생성·**존 정점 전부 외곽 안**·토글 on/off(.visible)·**존 위에 직사각형 그리기 정상**(방 y0.02>존 y0.012)·
+        **★빈 zones 응답→존 0·토글 비활성·조언 텍스트는 정상**·에러0. 회귀 7종(design_advice/clickdraw/rectroom/
+        fixedroom/genlayout/export/autosave)+design_advice_backend 22 전부 그린.
+      ③(JJ 수동·필수, 실제 키) A세대 조언→ⓐ존이 **이름과 함께** 3D에 뜸 ⓑ외곽 안 ⓒ토글 on/off ⓓ존(점선·흐림)이
+        실벽과 구분 ⓔ**존 보며 직사각형 그리기**(존이 가이드로 보이고 그린 방이 위에 얹힘) ⓕ새 조언 교체·세대
+        나가면 사라짐. **오피스텔로도 1회**. 통과 전 미완료.
+      ⚠️ **ANTHROPIC_API_KEY 필요**(design-advice와 동일). 자동검증은 목으로 키 없이.
+      ⚠️ 한계: 존은 AI 추정 대략값(정밀 보장 X, 클립으로 외곽 안엔 유지). zones 안 주거나 깨지면 텍스트만(존 없음).
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)

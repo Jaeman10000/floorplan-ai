@@ -566,6 +566,8 @@
             <button id="btn-advice" disabled style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none;">💡 AI에게 설계 조언 받기</button>
             <button id="btn-advice-replay" disabled title="마지막 조언 다시 보기" style="padding:9px 10px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#2e2640; color:#c4b5fd; border:1px solid #4c1d95; white-space:nowrap;">📄 다시 보기</button>
           </div>
+          <button id="btn-zone-toggle" disabled title="3D에 표시된 대략 위치 존 켜기/끄기" style="width:100%; margin-top:6px; padding:8px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#23202e; color:#c4b5fd; border:1px dashed #4c1d95;">🗺️ 위치 존 표시</button>
+          <div style="font-size:10px; color:#7d7d8a; margin-top:6px; line-height:1.5;">점선 존은 AI 추정 <b>대략 위치</b>입니다 — 정확하지 않으니 방향 참고용. 직사각형 방 도구로 직접 그리세요.</div>
         </div>
         <!-- ② 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
         <div style="display:flex; gap:6px;">
@@ -757,6 +759,9 @@ let rectPreview = null;        // 직사각형 미리보기 LineLoop
 let rectSizeLabel = null;      // 직사각형 가로×세로 라벨
 let selectedDesignFace = -1;   // 고정/이름 모드에서 선택된 designRooms 인덱스 (-1=없음)
 let _designRoomTiles = [];     // 방 타일 메시(raycast용, userData.faceIdx) — 라벨과 분리
+let designZones = [];          // AI 설계 조언 '대략적 위치 존' [{name, poly(mm), area_m2}] — 가이드(휘발)
+let _designZoneMeshes = [];    // 존 메시(반투명 면+점선+라벨) — 방/벽과 별개 레이어
+let designZonesVisible = true; // 존 표시 토글 상태
 let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
 let designDrawing = false;     // 그리기 진행중 (첫 점 찍힘, 둘째 클릭 대기) = drawStart!=null
 let drawStart = null;          // 그리는 벽의 시작점 [x,y] mm (null=idle)
@@ -2146,6 +2151,55 @@ function renderDesignRooms() {
   }
 }
 
+// ── AI 조언 '대략적 위치 존' 가이드 레이어 (실벽 아님 · 휘발) ──────────────────
+// 방 타일(y=0.02)·벽과 별개 배열(_designZoneMeshes)로만 dispose → recompute/render와 충돌 0.
+// 흐린 반투명 면(opacity 0.18) + 점선 테두리 + "(대략)" 라벨로 실벽과 시각 구분.
+// raycast 배열(_designRoomTiles)에 안 넣어 고정/이름 모드 면 클릭에 안 걸림.
+function renderDesignZones() {
+  for (const m of _designZoneMeshes) {
+    if (designGroup) designGroup.remove(m);
+    if (m.geometry) m.geometry.dispose();
+    if (m.material) m.material.dispose();
+  }
+  _designZoneMeshes = [];
+  if (!designGroup) return;
+  for (let i = 0; i < designZones.length; i++) {
+    const z = designZones[i];
+    if (!z.poly || z.poly.length < 3) continue;
+    const color = ROOM_PALETTE[i % ROOM_PALETTE.length];
+    // 흐린 반투명 채움 (방 타일 0.02보다 아래 y=0.012 → JJ가 그린 방이 위에 보임)
+    const shape = new THREE.Shape(z.poly.map(p => new THREE.Vector2(p[0] / 1000, p[1] / 1000)));
+    const tile = new THREE.Mesh(new THREE.ShapeGeometry(shape),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18,
+                                    side: THREE.DoubleSide, depthWrite: false }));
+    tile.rotation.x = Math.PI / 2; tile.position.y = 0.012;
+    tile.visible = designZonesVisible;
+    designGroup.add(tile); _designZoneMeshes.push(tile);
+    // 점선 테두리 (가이드 = 정밀 아님 표시)
+    const pts = z.poly.map(p => new THREE.Vector3(p[0] / 1000, 0.014, p[1] / 1000));
+    pts.push(pts[0].clone());
+    const lin = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineDashedMaterial({ color, dashSize: 0.25, gapSize: 0.18, transparent: true, opacity: 0.7 }));
+    lin.computeLineDistances();   // 점선 표시에 필수
+    lin.visible = designZonesVisible;
+    designGroup.add(lin); _designZoneMeshes.push(lin);
+    // 이름 라벨 "(대략)" — 방 라벨(y=0.6)보다 낮게
+    const c = polyCentroid(z.poly);
+    const label = makeLabel(`${z.name || "방"} (대략)`);
+    label.position.set(c[0] / 1000, 0.45, c[1] / 1000);
+    label.visible = designZonesVisible;
+    designGroup.add(label); _designZoneMeshes.push(label);
+  }
+}
+
+// 존 표시 on/off 토글 (그리는 데 방해되면 끔)
+function toggleDesignZones() {
+  designZonesVisible = !designZonesVisible;
+  _designZoneMeshes.forEach(m => m.visible = designZonesVisible);
+  const b = document.getElementById("btn-zone-toggle");
+  if (b) b.textContent = designZonesVisible ? "🗺️ 위치 존 숨김" : "🗺️ 위치 존 표시";
+}
+
 // ── 고정 방(Fixed Room): 그리기→이름→잠금 ────────────────────────────────────
 // designWalls 중복 선분 제거 (재주입 전 정리). 좌표 반올림 후 양끝 정렬 키로 dedup.
 function dedupDesignWalls() {
@@ -2425,6 +2479,7 @@ async function enterDesignMode(unit) {
   if (!boundary || boundary.length < 3) { showStatus("외곽을 만들 수 없습니다.", "error"); return false; }
 
   designUnit = unit; designBoundary = boundary; designWalls = loadedWalls; designRooms = []; designHistory = [];
+  designZones = []; _designZoneMeshes = []; designZonesVisible = true;   // 존은 휘발 — 진입 시 리셋
   designRoomNames = loadedNames;   // 저장본 이름 복원 (첫 진입은 빈 배열)
   designFixedRooms = loadedFixed;  // 저장본 고정 방 복원
   designFixMode = false; selectedDesignFace = -1;
@@ -2478,6 +2533,7 @@ function exitDesignMode() {
     roomScene.remove(designGroup);
   }
   designGroup = null; _designWallMeshes = []; _designRoomMeshes = []; _designRoomTiles = [];
+  designZones = []; _designZoneMeshes = []; designZonesVisible = true;   // 존 정리 (저장 안 함)
   designBoundary = null; designWalls = []; designRooms = []; designHistory = []; designRoomNames = [];
   designFixedRooms = []; selectedDesignFace = -1; designFixMode = false;
   designRectMode = false; designNameMode = false; rectStart = null; rectPreview = null; rectSizeLabel = null;
@@ -2714,7 +2770,14 @@ async function requestDesignAdvice() {
     const answer = data.answer || "(응답 없음)";
     _lastDesignAdvice = { text: answer, unit: designUnit };
     openAdviceModal(answer);
-    showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언 완료. 보고 방 도구로 직접 그리세요.`, "ok");
+    // 대략적 위치 존 오버레이 (가이드 · 휘발). 파싱 실패 시 빈 배열 → 존만 안 뜸, 조언은 위에서 이미 표시.
+    designZones = Array.isArray(data.zones) ? data.zones : [];
+    designZonesVisible = true;
+    renderDesignZones();
+    const zb = document.getElementById("btn-zone-toggle");
+    if (zb) zb.textContent = "🗺️ 위치 존 숨김";
+    const zmsg = designZones.length ? ` 대략 위치 존 ${designZones.length}개 표시(가이드).` : "";
+    showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언 완료.${zmsg} 보고 방 도구로 직접 그리세요.`, "ok");
   } catch (err) {
     showStatus(err.name === "AbortError"
       ? "설계 조언 시간 초과(60초). 잠시 후 다시 시도하세요."
@@ -2809,6 +2872,8 @@ function updateDesignActions() {
   if (ba) ba.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const br = document.getElementById("btn-advice-replay");
   if (br) br.disabled = !_lastDesignAdvice;
+  const bz = document.getElementById("btn-zone-toggle");
+  if (bz) bz.disabled = !designZones.length;
   const u = document.getElementById("btn-undo-design");
   const cl = document.getElementById("btn-clear-design");
   const rv = document.getElementById("btn-revert-design");
@@ -3055,6 +3120,7 @@ document.getElementById("btn-cancel-room-edit").addEventListener("click", () => 
 // ── AI 조언 — 설계 모드 전용 (btn-advice는 design-actions 안에 있음) ────────
 // requestAdvice()는 /api/ai-advice 경로 — 백엔드는 보존, 프런트 호출 경로만 제거.
 document.getElementById("btn-advice").addEventListener("click", requestDesignAdvice);
+document.getElementById("btn-zone-toggle").addEventListener("click", toggleDesignZones);
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────
 function showStatus(msg, type) {
