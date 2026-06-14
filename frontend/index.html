@@ -568,8 +568,30 @@
           <button class="btn-secondary" id="btn-clear-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>그리던 것 지우기</button>
           <button class="btn-secondary" id="btn-revert-design" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>이 세대 원본으로</button>
         </div>
+        <!-- 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
+        <div style="display:flex; gap:6px; margin-top:4px;">
+          <button class="btn-secondary" id="btn-rect-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">▭ 직사각형 방</button>
+          <button class="btn-secondary" id="btn-name-mode" style="flex:1; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">✏️ 방 이름</button>
+        </div>
+        <!-- 방 이름 붙이기 패널 -->
+        <div id="design-name-panel" style="display:none; padding:8px; background:#161a22; border-radius:8px;">
+          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">닫힌 방을 클릭해 선택하고 이름을 정하세요</div>
+          <select id="design-name-select" style="width:100%; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+            <option value="">— 직접 입력 —</option>
+            <option value="거실">거실</option>
+            <option value="주방">주방</option>
+            <option value="침실">침실</option>
+            <option value="욕실">욕실</option>
+            <option value="현관">현관</option>
+            <option value="다용도실">다용도실</option>
+            <option value="발코니">발코니</option>
+            <option value="드레스룸">드레스룸</option>
+          </select>
+          <input type="text" id="design-name-input" placeholder="또는 직접 입력..." style="width:100%; margin-top:6px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
+          <button class="action-btn btn-primary" id="btn-apply-name" style="width:100%; margin-top:8px; padding:9px;" disabled>✏️ 이름 지정</button>
+        </div>
         <!-- 고정 방(현관 등 위치 아는 공간) 그려 잠그기 -->
-        <button class="btn-secondary" id="btn-fix-mode" style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; margin-top:4px;">🔒 고정 방 지정</button>
+        <button class="btn-secondary" id="btn-fix-mode" style="padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">🔒 고정 방 지정</button>
         <div id="design-fix-panel" style="display:none; padding:8px; background:#161a22; border-radius:8px;">
           <div style="font-size:11px; color:#9aa; margin-bottom:6px;">선택한 면에 이름을 정하고 고정으로 잠그세요</div>
           <select id="design-fix-select" style="width:100%; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px;">
@@ -592,10 +614,12 @@
         내벽이 사라진 빈 외곽에 <b>시작점 클릭 → 끝점 클릭</b>으로 벽을 그으세요(드래그 아님).
         거의 수평/수직이면 <b>직각으로 자동 정렬</b>되고, <b>Shift</b>를 누르면 자유 각도입니다.
         기존 벽·외곽 근처면 붙어서 그려져 벽이 만나면 닫힌 공간이 자동으로 방이 됩니다.<br>
+        <b>▭ 직사각형 방</b>을 켜면 <b>대각선 두 점 클릭</b>으로 방 하나를 한 번에 그립니다(축정렬·100mm 격자 스냅).<br>
+        <b>✏️ 방 이름</b>을 켜고 닫힌 방을 클릭→이름을 정하면 라벨이 붙습니다(저장·재진입 유지).<br>
         <b>💾 저장</b>하면 우측 To-Be 패널에 새 구조로 남고, 종료/재진입해도 유지됩니다.<br>
         <b>🔒 고정 방 지정</b>을 켜고 닫힌 방을 클릭→이름을 정해 잠그면 현관·다용도실처럼
         위치가 정해진 공간으로 고정됩니다(<b>그리던 것 지우기에도 보존</b>).<br>
-        우드래그=카메라 · <b>Esc/우클릭=그리던 선 취소</b> · Ctrl+Z=되돌리기.
+        세 모드(▭/✏️/🔒)는 <b>한 번에 하나만</b> 켜집니다. 우드래그=카메라 · <b>Esc/우클릭=취소</b> · Ctrl+Z=되돌리기.
       </div>
     </div>
 
@@ -691,7 +715,12 @@ let designRooms = [];          // 닫힌 면 = 방 [{poly, area_m2, color, name,
 let designRoomNames = [];      // AI가 준 방 이름+중심 [{name, cx, cy}] — 면 중심 매칭용 (best effort)
 let designFixedRooms = [];     // JJ가 잠근 고정 방 [{name, poly(mm)}] — 이름+레지스트리+핸드오프 데이터
 let designFixMode = false;     // 🔒 고정 방 지정 서브모드 (ON이면 좌클릭=면 선택)
-let selectedDesignFace = -1;   // 고정 모드에서 선택된 designRooms 인덱스 (-1=없음)
+let designRectMode = false;    // ▭ 직사각형 방 그리기 서브모드 (대각선 2점)
+let designNameMode = false;    // ✏️ 방 이름 붙이기 서브모드 (면 클릭→이름)
+let rectStart = null;          // 직사각형 첫 모서리 [x,y] mm (null=idle)
+let rectPreview = null;        // 직사각형 미리보기 LineLoop
+let rectSizeLabel = null;      // 직사각형 가로×세로 라벨
+let selectedDesignFace = -1;   // 고정/이름 모드에서 선택된 designRooms 인덱스 (-1=없음)
 let _designRoomTiles = [];     // 방 타일 메시(raycast용, userData.faceIdx) — 라벨과 분리
 let designGroup = null;        // 설계 레이어 THREE.Group (바닥/외곽/벽/방)
 let designDrawing = false;     // 그리기 진행중 (첫 점 찍힘, 둘째 클릭 대기) = drawStart!=null
@@ -1595,6 +1624,15 @@ function shoelaceArea(poly) {
   }
   return Math.abs(a) / 2;
 }
+// 부호 있는 면적 (방향 판별용 — 양수/음수). recomputeDesignRooms에서 외부면 제외에 사용.
+function shoelaceSigned(poly) {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a / 2;
+}
 
 // 포인터 → 바닥평면(y=0) 교차점 (world m)
 function groundPoint(e) {
@@ -1673,6 +1711,24 @@ function snapPoint(raw, from, allowOrtho = true) {
   return p;  // 직각 스냅(또는 raw)
 }
 
+// 직사각형 모서리 스냅: 정점(_SNAP_MM) → 선분(_SNAP_MM) → 100mm 격자. 직각 스냅 안 씀.
+function snapCorner(raw) {
+  if (!raw) return raw;
+  let best = null, bd = _SNAP_MM;
+  for (const v of _snapVertices()) {
+    const d = Math.hypot(raw[0] - v[0], raw[1] - v[1]);
+    if (d < bd) { bd = d; best = [v[0], v[1]]; }
+  }
+  if (best) return best;
+  let bs = null, bsd = _SNAP_MM;
+  for (const [a, b] of _snapSegments()) {
+    const r = _projOnSeg(raw, a, b);
+    if (r.d < bsd) { bsd = r.d; bs = r.pt; }
+  }
+  if (bs) return bs;
+  return [Math.round(raw[0] / 100) * 100, Math.round(raw[1] / 100) * 100];  // 격자
+}
+
 // ── 미리보기 + 길이 라벨 ──────────────────────────────────────────────────
 function beginDrawPreview() {
   endDrawPreview();
@@ -1711,6 +1767,49 @@ function cancelDraw() {
   showStatus("그리기를 취소했습니다.", "info");
 }
 
+// ── 직사각형 방 미리보기 (4변 점선 + 가로×세로 라벨) ────────────────────────
+function endRectPreview() {
+  if (rectPreview && designGroup) { designGroup.remove(rectPreview); rectPreview.geometry.dispose(); rectPreview.material.dispose(); }
+  if (rectSizeLabel && designGroup) designGroup.remove(rectSizeLabel);
+  rectPreview = null; rectSizeLabel = null;
+}
+function updateRectPreview(end) {
+  if (!rectStart || !designGroup) return;
+  endRectPreview();
+  const x0 = Math.min(rectStart[0], end[0]), x1 = Math.max(rectStart[0], end[0]);
+  const y0 = Math.min(rectStart[1], end[1]), y1 = Math.max(rectStart[1], end[1]);
+  const corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]];
+  const g = new THREE.BufferGeometry().setFromPoints(
+    corners.map(p => new THREE.Vector3(p[0] / 1000, 0.03, p[1] / 1000)));
+  rectPreview = new THREE.Line(g, new THREE.LineDashedMaterial({ color: 0x4ade80, dashSize: 0.15, gapSize: 0.1, transparent: true, depthTest: false }));
+  rectPreview.computeLineDistances();
+  rectPreview.renderOrder = 1000;
+  designGroup.add(rectPreview);
+  rectSizeLabel = makeLabel(`가로 ${((x1 - x0) / 1000).toFixed(2)}m × 세로 ${((y1 - y0) / 1000).toFixed(2)}m`);
+  rectSizeLabel.position.set((x0 + x1) / 2000, 0.5, (y0 + y1) / 2000);
+  rectSizeLabel.renderOrder = 1001;
+  designGroup.add(rectSizeLabel);
+}
+// 진행중 직사각형 취소 (Esc / 우클릭) — 첫 모서리·미리보기만 버림
+function cancelRect() {
+  if (!rectStart) return;
+  endRectPreview();
+  rectStart = null; _drawDownXY = null;
+  showStatus("직사각형 그리기를 취소했습니다.", "info");
+}
+
+// 마우스 이벤트 → 방 타일 raycast → faceIdx (없으면 -1). 고정/이름 모드 면 선택 공용.
+function _pickDesignFaceIdx(e) {
+  const rect = roomRenderer.domElement.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(mouse, roomCamera);
+  const hits = ray.intersectObjects(_designRoomTiles);
+  return hits.length ? hits[0].object.userData.faceIdx : -1;
+}
+
 // ── 클릭-클릭 그리기 (window 싱글톤) ────────────────────────────────────────
 // 우버튼 down 좌표 기록 — 우클릭(취소) vs 우드래그(카메라) 구분용
 window.addEventListener("mousedown", e => {
@@ -1718,18 +1817,24 @@ window.addEventListener("mousedown", e => {
 });
 // hover 미리보기: 진행중(drawStart!=null)이면 버튼 안 눌러도 끝점을 따라감.
 window.addEventListener("mousemove", e => {
-  if (!designMode || !drawStart) return;
+  if (!designMode) return;
+  if (rectStart) {   // 직사각형 모드: 반대 모서리 hover → 사각형 미리보기
+    const raw = groundMM(e);
+    if (raw) updateRectPreview(snapCorner(raw));
+    return;
+  }
+  if (!drawStart) return;
   const raw = groundMM(e);
   if (!raw) return;
   updateDrawPreview(snapPoint(raw, drawStart, !e.shiftKey));
 });
 // 좌버튼 떼는 순간: mousedown 대비 이동량으로 클릭/드래그 판정 → 클릭만 점을 찍는다.
 window.addEventListener("mouseup", e => {
-  // 우클릭(이동 거의 없음) = 진행중 선 취소
-  if (e.button === 2 && drawStart && _rightDownXY) {
+  // 우클릭(이동 거의 없음) = 진행중 선/직사각형 취소
+  if (e.button === 2 && (drawStart || rectStart) && _rightDownXY) {
     const m = Math.hypot(e.clientX - _rightDownXY.x, e.clientY - _rightDownXY.y);
     _rightDownXY = null;
-    if (m <= _CLICK_MAX_PX) { cancelDraw(); return; }
+    if (m <= _CLICK_MAX_PX) { if (rectStart) cancelRect(); else cancelDraw(); return; }
   }
   if (e.button === 2) { _rightDownXY = null; return; }
   if (e.button !== 0 || !designMode || !_drawDownXY) return;
@@ -1739,19 +1844,49 @@ window.addEventListener("mouseup", e => {
 
   // 🔒 고정 모드: 좌클릭 = 방 타일 raycast 면 선택 (벽 그리기 안 탐)
   if (designFixMode) {
-    const rect = roomRenderer.domElement.getBoundingClientRect();
-    const mouse = new THREE.Vector2(
-      ((e.clientX - rect.left) / rect.width) * 2 - 1,
-      -((e.clientY - rect.top) / rect.height) * 2 + 1);
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(mouse, roomCamera);
-    const hits = ray.intersectObjects(_designRoomTiles);
-    if (hits.length) {
-      const idx = hits[0].object.userData.faceIdx;
-      selectDesignFace(idx === selectedDesignFace ? -1 : idx);   // 재클릭 = 해제
-    } else {
-      selectDesignFace(-1);
+    const idx = _pickDesignFaceIdx(e);
+    selectDesignFace(idx === selectedDesignFace ? -1 : idx);   // 재클릭/빈곳 = 해제
+    return;
+  }
+
+  // ✏️ 이름 모드: 좌클릭 = 면 선택 후 이름 패널 (벽 그리기 안 탐)
+  if (designNameMode) {
+    const idx = _pickDesignFaceIdx(e);
+    selectNameFace(idx === selectedDesignFace ? -1 : idx);
+    return;
+  }
+
+  // ▭ 직사각형 모드: 대각선 두 점 클릭 (벽 그리기 안 탐)
+  if (designRectMode) {
+    const raw = groundMM(e);
+    if (!raw) return;
+    if (!rectStart) {
+      rectStart = snapCorner(raw);
+      showStatus("첫 모서리 지정됨 — 반대 모서리를 클릭하세요. (Esc/우클릭=취소)", "info");
+      return;
     }
+    const end = snapCorner(raw);
+    const x0 = Math.min(rectStart[0], end[0]), x1 = Math.max(rectStart[0], end[0]);
+    const y0 = Math.min(rectStart[1], end[1]), y1 = Math.max(rectStart[1], end[1]);
+    if (x1 - x0 < _DRAW_MIN_MM || y1 - y0 < _DRAW_MIN_MM) {   // 너무 작음 → 재클릭
+      showStatus("너무 작습니다 — 반대 모서리를 더 멀리 클릭하세요.", "info");
+      return;
+    }
+    designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+    if (designHistory.length > 50) designHistory.shift();
+    designWalls.push({ a: [x0, y0], b: [x1, y0] });
+    designWalls.push({ a: [x1, y0], b: [x1, y1] });
+    designWalls.push({ a: [x1, y1], b: [x0, y1] });
+    designWalls.push({ a: [x0, y1], b: [x0, y0] });
+    dedupDesignWalls();   // 인접 사각형 공유변 중복 제거
+    endRectPreview();
+    rectStart = null;
+    recomputeDesignRooms();
+    renderDesignWalls();
+    renderDesignRooms();
+    updateDesignActions();
+    const nr = designRooms.length;
+    showStatus(`직사각형 방 추가 (${((x1 - x0) / 1000).toFixed(2)}m × ${((y1 - y0) / 1000).toFixed(2)}m). 닫힌 방 ${nr}개.`, "ok");
     return;
   }
 
@@ -1888,9 +2023,13 @@ function recomputeDesignRooms() {
   const fixedHit = new Array(designFixedRooms.length).fill(false);   // 스테일 lock reconcile용
   let ci = 0;
   for (const f of faces) {
-    const ar = shoelaceArea(f);
+    // 부호 있는 면적: 내부(실제 방)는 양수, 외부/역방향 둘레면은 음수.
+    // (외곽에 안 닿고 떠 있는 닫힌 루프는 정·역 두 면이 잡히는데, 음수면을 버려 1개만 남긴다.)
+    const sa = shoelaceSigned(f);
+    const ar = Math.abs(sa);
     if (ar < _FACE_MIN_AREA) continue;                 // 너무 작은 면 제외
     if (ar > outArea * 0.97) continue;                 // 외곽 전체와 동일(=아직 안 나뉨)·외부면 제외
+    if (sa < 0) continue;                              // 음수=외부/역방향 둘레면 → 제외
     const c = polyCentroid(f);
     // 고정(잠긴) 방 매칭 우선: 면 중심이 잠긴 poly 안이면 그 이름·잠금 표시.
     let name = null, locked = false;
@@ -2018,22 +2157,52 @@ function renderFixedList() {
   });
 }
 
+// 서브모드 상호배타: except('fix'|'rect'|'name') 외의 서브모드를 끄고 진행중 그리기/사각형 취소.
+function _offOtherSubModes(except) {
+  if (drawStart) { endDrawPreview(); drawStart = null; designDrawing = false; _drawDownXY = null; }
+  if (rectStart) { endRectPreview(); rectStart = null; }
+  if (except !== "fix" && designFixMode) {
+    designFixMode = false;
+    const b = document.getElementById("btn-fix-mode");
+    if (b) { b.textContent = "🔒 고정 방 지정"; b.classList.remove("btn-primary"); b.classList.add("btn-secondary"); }
+    const p = document.getElementById("design-fix-panel"); if (p) p.style.display = "none";
+  }
+  if (except !== "rect" && designRectMode) {
+    designRectMode = false;
+    const b = document.getElementById("btn-rect-mode");
+    if (b) { b.textContent = "▭ 직사각형 방"; b.classList.remove("btn-primary"); b.classList.add("btn-secondary"); }
+  }
+  if (except !== "name" && designNameMode) {
+    designNameMode = false;
+    const b = document.getElementById("btn-name-mode");
+    if (b) { b.textContent = "✏️ 방 이름"; b.classList.remove("btn-primary"); b.classList.add("btn-secondary"); }
+    const p = document.getElementById("design-name-panel"); if (p) p.style.display = "none";
+  }
+}
+
 // 고정 모드 UI를 OFF 상태로 초기화 (DOM만 — designGroup 없을 때도 안전)
 function resetFixModeUI() {
-  designFixMode = false; selectedDesignFace = -1;
+  designFixMode = false; designRectMode = false; designNameMode = false; selectedDesignFace = -1;
+  rectStart = null;
   const btn = document.getElementById("btn-fix-mode");
   if (btn) { btn.textContent = "🔒 고정 방 지정"; btn.classList.remove("btn-primary"); btn.classList.add("btn-secondary"); }
   const panel = document.getElementById("design-fix-panel");
   if (panel) panel.style.display = "none";
   const lb = document.getElementById("btn-lock-fixed");
   if (lb) lb.disabled = true;
+  const rb = document.getElementById("btn-rect-mode");
+  if (rb) { rb.textContent = "▭ 직사각형 방"; rb.classList.remove("btn-primary"); rb.classList.add("btn-secondary"); }
+  const nb = document.getElementById("btn-name-mode");
+  if (nb) { nb.textContent = "✏️ 방 이름"; nb.classList.remove("btn-primary"); nb.classList.add("btn-secondary"); }
+  const np = document.getElementById("design-name-panel");
+  if (np) np.style.display = "none";
   renderFixedList();
 }
 
 // 🔒 고정 방 지정 서브모드 토글
 function setFixMode(on) {
+  if (on) _offOtherSubModes("fix");   // 직사각형·이름 모드 끄고 진행중 그리기 취소
   designFixMode = on;
-  if (on && drawStart) { endDrawPreview(); drawStart = null; designDrawing = false; _drawDownXY = null; }  // 진행중 선 취소
   selectedDesignFace = -1;
   const btn = document.getElementById("btn-fix-mode");
   const panel = document.getElementById("design-fix-panel");
@@ -2048,6 +2217,86 @@ function setFixMode(on) {
   renderDesignRooms();
   showStatus(on ? "🔒 고정 방 지정 모드 — 닫힌 방을 클릭해 선택하세요." :
                   "고정 방 지정 모드를 종료했습니다.", "info");
+}
+
+// ▭ 직사각형 방 그리기 서브모드 토글
+function setRectMode(on) {
+  if (on) _offOtherSubModes("rect");
+  if (!on && rectStart) cancelRect();
+  designRectMode = on;
+  selectedDesignFace = -1;
+  const btn = document.getElementById("btn-rect-mode");
+  if (btn) {
+    btn.textContent = on ? "▭ 직사각형 방 종료" : "▭ 직사각형 방";
+    btn.classList.toggle("btn-primary", on);
+    btn.classList.toggle("btn-secondary", !on);
+  }
+  renderDesignRooms();
+  showStatus(on ? "▭ 직사각형 방 모드 — 대각선 두 점을 클릭하면 방이 만들어집니다." :
+                  "직사각형 방 모드를 종료했습니다.", "info");
+}
+
+// ✏️ 방 이름 붙이기 서브모드 토글
+function setNameMode(on) {
+  if (on) _offOtherSubModes("name");
+  designNameMode = on;
+  selectedDesignFace = -1;
+  const btn = document.getElementById("btn-name-mode");
+  const panel = document.getElementById("design-name-panel");
+  if (btn) {
+    btn.textContent = on ? "✏️ 방 이름 종료" : "✏️ 방 이름";
+    btn.classList.toggle("btn-primary", on);
+    btn.classList.toggle("btn-secondary", !on);
+  }
+  if (panel) panel.style.display = on ? "block" : "none";
+  const ab = document.getElementById("btn-apply-name"); if (ab) ab.disabled = true;
+  renderDesignRooms();
+  showStatus(on ? "✏️ 방 이름 모드 — 닫힌 방을 클릭해 이름을 정하세요." :
+                  "방 이름 모드를 종료했습니다.", "info");
+}
+
+// 이름 모드에서 면 선택 (raycast 결과 faceIdx) — 이름 패널 채움
+function selectNameFace(idx) {
+  selectedDesignFace = idx;
+  renderDesignRooms();
+  const ab = document.getElementById("btn-apply-name");
+  if (idx < 0 || !designRooms[idx]) { if (ab) ab.disabled = true; return; }
+  const rm = designRooms[idx];
+  if (rm.locked) {   // 잠긴 방은 이름 모드로 못 바꿈(고정 해제 필요)
+    if (ab) ab.disabled = true;
+    showStatus(`🔒 잠긴 방(${rm.name})입니다. 이름 변경은 고정 해제 후 가능합니다.`, "info");
+    return;
+  }
+  if (ab) ab.disabled = false;
+  const pre = rm.name || "";
+  document.getElementById("design-name-input").value = pre;
+  document.getElementById("design-name-select").value =
+    (["거실","주방","침실","욕실","현관","다용도실","발코니","드레스룸"].includes(pre)) ? pre : "";
+  showStatus(`면 선택됨 (${rm.area_m2}㎡) — 이름을 정해 지정하세요.`, "info");
+}
+
+// 선택한 면에 이름 지정 (designRoomNames에 합침 — recompute 후 면 중심 매칭으로 유지)
+// ★As-Is 방이름 수정용 applyRoomName(별도 함수)과 이름 충돌 방지 위해 'Design' 접미.
+function applyDesignRoomName() {
+  if (selectedDesignFace < 0 || !designRooms[selectedDesignFace]) {
+    showStatus("먼저 이름 붙일 방(닫힌 면)을 클릭하세요.", "error"); return;
+  }
+  const rm = designRooms[selectedDesignFace];
+  if (rm.locked) { showStatus("잠긴 방입니다. 고정 해제 후 변경하세요.", "info"); return; }
+  const name = document.getElementById("design-name-input").value.trim();
+  if (!name) { showStatus("이름을 입력하세요 (예: 거실).", "error"); return; }
+  const c = polyCentroid(rm.poly);
+  // 이 면 안에 있던 기존 이름 항목 제거(중복/덮어쓰기) 후 새 이름 추가
+  designRoomNames = designRoomNames.filter(rn => !pointInPoly([rn.cx, rn.cy], rm.poly));
+  designRoomNames.push({ name, cx: c[0], cy: c[1] });
+  selectedDesignFace = -1;
+  document.getElementById("design-name-input").value = "";
+  document.getElementById("design-name-select").value = "";
+  document.getElementById("btn-apply-name").disabled = true;
+  recomputeDesignRooms();
+  renderDesignWalls(); renderDesignRooms();
+  updateDesignActions();
+  showStatus(`✏️ "${name}" 이름을 지정했습니다.`, "ok");
 }
 
 // 고정 모드에서 면 선택 (raycast 결과 faceIdx)
@@ -2191,6 +2440,7 @@ function exitDesignMode() {
   designGroup = null; _designWallMeshes = []; _designRoomMeshes = []; _designRoomTiles = [];
   designBoundary = null; designWalls = []; designRooms = []; designHistory = []; designRoomNames = [];
   designFixedRooms = []; selectedDesignFace = -1; designFixMode = false;
+  designRectMode = false; designNameMode = false; rectStart = null; rectPreview = null; rectSizeLabel = null;
   designUnit = null; drawStart = null; designDrawing = false;
   // 원본 레이어 복귀
   roomTiles.forEach(t => t.visible = true);
@@ -2313,7 +2563,7 @@ async function exportPlanPdf() {
     unit: designUnit,
     boundary_mm: designBoundary.map(p => p.slice()),
     walls: designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })),
-    rooms: designRooms.map(r => ({ poly: r.poly.map(p => p.slice()), area_m2: r.area_m2 })),
+    rooms: designRooms.map(r => ({ poly: r.poly.map(p => p.slice()), area_m2: r.area_m2, name: r.name || "" })),
     when: new Date().toLocaleString("ko-KR"),
     filename,
   };
@@ -2495,7 +2745,13 @@ document.getElementById("btn-generate-layout").addEventListener("click", generat
 })();
 document.getElementById("btn-export-png").addEventListener("click", capture3dPng);
 document.getElementById("btn-export-pdf").addEventListener("click", exportPlanPdf);
-// 🔒 고정 방
+// ▭ 직사각형 방 / ✏️ 방 이름 / 🔒 고정 방 (서브모드 3개 상호배타)
+document.getElementById("btn-rect-mode").addEventListener("click", () => setRectMode(!designRectMode));
+document.getElementById("btn-name-mode").addEventListener("click", () => setNameMode(!designNameMode));
+document.getElementById("btn-apply-name").addEventListener("click", applyDesignRoomName);
+document.getElementById("design-name-select").addEventListener("change", e => {
+  if (e.target.value) document.getElementById("design-name-input").value = e.target.value;
+});
 document.getElementById("btn-fix-mode").addEventListener("click", () => setFixMode(!designFixMode));
 document.getElementById("btn-lock-fixed").addEventListener("click", lockSelectedFace);
 document.getElementById("design-fix-select").addEventListener("change", e => {
@@ -2505,8 +2761,8 @@ document.getElementById("design-fix-select").addEventListener("change", e => {
 window.addEventListener("keydown", e => {
   if (designMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
     e.preventDefault(); undoDesignWall();
-  } else if (designMode && e.key === "Escape" && drawStart) {
-    e.preventDefault(); cancelDraw();
+  } else if (designMode && e.key === "Escape" && (drawStart || rectStart)) {
+    e.preventDefault(); if (rectStart) cancelRect(); else cancelDraw();
   }
 });
 

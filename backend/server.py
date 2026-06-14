@@ -1272,12 +1272,21 @@ def _build_plan_pdf(unit, boundary, walls, rooms, when=""):
         c.setStrokeColorRGB(0.75, 0.82, 0.90)
         c.setLineWidth(0.4)
         c.drawPath(path, stroke=1, fill=1)
-        # 면적 라벨 (centroid)
+        # 이름 + 면적 라벨 (centroid) — 이름 있으면 위에 이름, 아래에 면적
         cx = sum(p[0] for p in poly) / len(poly)
         cy = sum(p[1] for p in poly) / len(poly)
         area = rm.get("area_m2")
-        if area is not None:
-            c.setFillGray(0.15)
+        name = (rm.get("name") or "").strip()
+        c.setFillGray(0.15)
+        if name:
+            c.setFont(_KR_FONT, 9.5)
+            c.drawCentredString(tx(cx), ty(cy) + 3, name)
+            if area is not None:
+                c.setFont(_KR_FONT, 8)
+                c.setFillGray(0.35)
+                c.drawCentredString(tx(cx), ty(cy) - 9, f"{area} m²")
+            c.setFont(_KR_FONT, 9)
+        elif area is not None:
             c.drawCentredString(tx(cx), ty(cy) - 4, f"{area} m²")
 
     # 외곽선 (굵게)

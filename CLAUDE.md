@@ -664,6 +664,43 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
       ④(JJ 수동·필수, 실제 키) 직사각형 세대→무회귀 정상 / 빌라 A세대 침실3→안전영역 앵커·침실 폭
         개선·안 되면 형상경고·침실2로 낮추면 통과·서버 콘솔 attempt 로그 / C세대 삼각형→안전배치+모서리
         직접 마감 / **오피스텔** 1회. 통과 전 미완료.
+- [x] **수동 설계 B 강화 — 직사각형 방 빠르게 그리기 + 방 이름 붙이기**(AI 자동배치는 ㄱ자 한계가
+      명확 → JJ가 직접 빠르게 그리는 도구 강화. 이번은 B의 첫 조각, AI generate-layout 무수정).
+      **서브모드 3개 상호배타**(`_offOtherSubModes(except)` 코디네이터 — 한 모드 켤 때 나머지 끄고 진행중
+        drawStart·rectStart 취소): 벽 클릭-클릭(기존)·**▭ 직사각형 방(designRectMode)**·**✏️ 방 이름
+        (designNameMode)**·🔒 고정 방(designFixMode). design-actions에 토글 3개 나란히. mouseup 상태머신에
+        `if(designFixMode)…/ if(designNameMode)…/ if(designRectMode)…` 분기를 벽 클릭-클릭 앞에 추가 →
+        서브모드 중엔 벽 그리기 자동 비활성.
+      **①직사각형(designRectMode)**: 대각선 2점 클릭. `rectStart`=첫 모서리, hover=점선 사각형 미리보기
+        +"가로W×세로H" 라벨, 둘째 클릭=두 대각 모서리 min/max로 **axis-aligned 4변 생성**(나머지 두 모서리
+        파생→항상 직각). **`snapCorner(raw)`**=정점(_SNAP_MM 350)→선분(350)→**100mm 격자**(직각 스냅 안 씀
+        —대각선엔 ortho 해로움). W or H<_DRAW_MIN_MM(100)이면 재클릭. **designHistory.push 1회=undo 1단위**
+        →4변 push→`dedupDesignWalls()`(인접 사각형 공유변 중복 제거)→recompute/render. Esc/우클릭=cancelRect.
+      **②이름(designNameMode)**: 면 raycast 선택(`_pickDesignFaceIdx` 공용 헬퍼)→`selectNameFace`(금색
+        하이라이트+패널)→`applyDesignRoomName`(드롭다운 거실/주방/침실/욕실/현관/다용도실/발코니/드레스룸
+        +직접입력). **저장처=기존 `designRoomNames`[{name,cx,cy}] 재사용**(AI 이름과 합침)→recompute가
+        면 중심 매칭으로 라벨 부여→`buildDesignSnapshot.roomNames`·`enterDesignMode` 복원으로 **저장·재진입
+        유지 공짜**. 잠긴 면은 이름 모드로 못 바꿈(고정 해제 필요). 한계: 면 가로지르게 벽 바꾸면 이름
+        어긋날 수 있음(AI 이름과 동일 best-effort).
+      **③PDF 이름 포함**(결정): `exportPlanPdf` payload rooms에 `name` 추가, 백엔드 `_build_plan_pdf`가
+        이름 있으면 `이름`(위)+`면적`(아래) 2줄, 없으면 면적만. PNG는 라이브 캡처라 이름 자동 포함.
+      ★**핵심 버그 2건(실측 발견·수정)**:
+        (a)**`shoelaceArea` 절댓값 → 외곽에 안 닿고 떠 있는 닫힌 루프가 면 2개로 잡힘**(정·역방향). 단일
+          사각형=중복 1개, 인접 2사각형=둘레 perimeter면까지 phantom. → `shoelaceSigned` 신설,
+          recomputeDesignRooms에서 **음수(외부/역방향)면 제외**(내부=양수 확인). 벽-외곽 연결 방은
+          기존대로(외부 큰 면은 음수+97% 둘 다로 제외). 기존 클릭-클릭 회귀 전부 그린.
+        (b)**`applyRoomName` 이름 충돌** — As-Is 방이름 수정용 함수가 이미 존재(2868줄). 함수 선언 호이스팅
+          으로 내 설계용이 덮어써져 호출이 엉뚱한 함수로 감 → **`applyDesignRoomName`으로 개명**.
+      무수정: 클릭-클릭 벽·고정 방(setFixMode는 `_offOtherSubModes("fix")` 1줄만)·AI생성(generate-layout)·
+        undo/clear/revert·autosave·묶기 localStorage·renderToBe·beforeunload·planarFaces. recompute는
+        signed-area 제외 1줄 추가(떠 있는 루프 버그 수정, 기존 동작 보존).
+      검증: ①(자동) `_verify_rectroom.py`(빌라 page3 A세대, **실제 클릭**) — 서브모드 상호배타·직사각형
+        모드 중 벽 클릭 비활성·대각2점→닫힌 방1·축정렬·면적·인접 공유변 dedup(벽7 방2)·undo 1단위·이름
+        지정(designRoomNames 반영·면 라벨·recompute 후 유지)·좌클릭중 카메라0·우드래그 카메라>0·에러0.
+        회귀 _verify_clickdraw/_verify_fixedroom/_verify_export/_verify_genlayout/_verify_autosave/
+        _verify_fixedlayout 전부 그린 + PDF 이름 백엔드 스모크(거실 추출 OK). ②(JJ 수동·필수) 직사각형으로
+        방 여러 개(인접 포함)→이름 붙이기(드롭다운+직접입력)→저장·재진입 유지→PNG/PDF 내보내기(이름
+        보이는지)→Ctrl+Z→클릭-클릭 벽과 혼용. **오피스텔도 1회**. 통과 전 미완료.
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)
