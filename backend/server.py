@@ -30,7 +30,11 @@ TMPDIR = tempfile.gettempdir()
 def health():
     _index = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
     if os.path.isfile(_index):
-        return FileResponse(_index)
+        return FileResponse(_index, headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
     return {"status": "ok", "message": "AI 도면 분석 서버 실행 중"}
 
 
