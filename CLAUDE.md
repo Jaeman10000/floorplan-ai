@@ -91,6 +91,54 @@ docs/
 - 작업 완료 후 git push
 - 특정 도면에만 맞는 하드코딩 금지
 
+## 확정 워크플로우 (JJ 설계 흐름)
+1. 💡 AI 설계 조언 → 전문가 배치 힌트 + 위치 존 가이드
+2. ▭ 직사각형 방 그리기 (규격 가이드표 참고)
+3. ✏️ 방 이름 → 규격 경고(⚠️) 확인
+4. ✥ 크기·이동으로 조정 (⚠️ 사라질 때까지)
+5. 🗑 잘못된 방 삭제
+6. 🔒 고정 방 지정 (위치 확정된 현관·다용도실 등)
+7. AI 초안·자동분할 병행 (정형 세대에 유효, 비정형은 수동이 현실)
+8. PNG/PDF 내보내기
+
+## 현재 상태 (2026-06-14 확인)
+
+### 완성된 기능 — 수동 설계 워크플로우 (B)
+- **직사각형 방 그리기**: 대각선 2점 클릭, snapCorner(_SNAP_MM=350), 점선 미리보기, undo 1단위, dedupDesignWalls
+- **방 이름 붙이기**: 드롭다운+직접입력, designRoomNames, point-in-poly 매칭, 저장·재진입 유지
+- **규격 피드백**: GET /api/arch-spec 단일소스, roomCategoryOf/checkRoomSpec/roomDims, 라벨에 W×H m + ⚠️ 미달경고, 직사각형 모드 시 규격 가이드표 표시. 거실=짧은변(백엔드 _validate_layout 긴변과 의도적 비동기)
+- **크기 숫자 변경**: designEditMode(✥), BL고정·우변/상변 이동, 정점에 닿는 designWall 끝점 변환, BL근접 재선택. isRect=꼭짓점 bbox 4변 ±60mm판정(planarFaces NODE_TOL 오판 수정)
+- **드래그 이동**: 3게이트 카메라 충돌 분리(capture mousedown·orbit gate·window mousemove), 100mm격자 강체평행이동, centroid재선택
+- **방 삭제**: deleteSelectedRoom, **t=0.1/0.3/0.5/0.7/0.9 다섯 샘플**로 경계벽 판정(전체 벽 중점이 방 모서리·T접합에 겹쳐 inA===inB로 오분류되는 버그 수정), 전용변 제거·공유변 유지, 잠긴방 차단, 완전둘러싸인방 차단, undo 도형만 복원(이름 미복원)
+
+### 완성된 기능 — AI
+- **설계 조언(POST /api/design-advice)**: 형상판정(_classify_shape)·방위(_edge_directions)·고정방·현재 방·트렌드 입력 반영, 텍스트만(좌표 없음), 모달 표시+캐싱+복사
+- **위치 존 오버레이**: zones JSON(텍스트 뒤 펜스블록), _split_advice_and_zones·_parse_zones_json, 반투명·점선·y=0.012(방타일 0.02 아래), 토글·휘발
+- **AI 구조 초안(POST /api/generate-layout)**: 건축규칙 HARD/SOFT·재생성 루프(max3회)·방위·내접 안전영역 앵커·형상경고·면적422
+- **규격 자동 분할(POST /api/partition-layout)**: BSP분할·feasibility게이트·방위배정·잔여존, 정형 전용(채움<0.6 거부)
+- **고정 방**: designFixedRooms, ensureLockedWalls, AI 생성 시 fixed_rooms 전송·avail=외곽-고정합집합·클립 이중안전망·고정 용도 중복금지
+- **As-Is AI 조언(POST /api/ai-advice)**: 기존 도면 기반 방위·배관·동선 조언(설계 모드 조언과 분리 유지)
+
+### 완성된 기능 — 저장·공유
+- **2D 평면도 PDF**: 방이름+치수+면적, 전체치수, 스케일바, A4, reportlab HYSMyeongJo
+- **3D PNG**: preserveDrawingBuffer:true
+- **저장·재진입**: autosaveDesign·buildDesignSnapshot·loadUnitsFromStorage, 방위 양방향 동기화
+- **세대 묶기 localStorage**: roomId 결정적, floorplan-units:{name}:{size}:{page} 키, 새로고침 후 복원
+
+### 한계 · 다음 증분 후보
+- **비정형 severe ㄱ자(채움<0.6)**: 자동분할 불가(프로토타입 실측). 수동 설계가 현실. zones 가이드+직접 그리기
+- **채광 정밀화**: 채광=세대외곽 접함만 → 옆세대 경계벽 오판 가능. 해결: 세대묶기 정보로 맞붙는 변=경계벽 구분
+- **undo가 도형만 복원**: 방 이름은 삭제 후 undo로 복원 안 됨(undoDesignWall 무수정 제약)
+- **잠긴 방 위 그리기 가드 미구현**: 면 쪼개기 방지 가드 다음 증분
+- **방 복사/붙여넣기 미구현**
+- **그리드 스냅 시각화 미구현**
+
+## 작업 방식
+- Claude가 계획·프롬프트 작성 → Claude Code가 구현 → JJ가 브라우저 수동 확인
+- **모델**: claude-sonnet-4-6 기본(수정·소개선). 신기능·복잡 설계는 필요시 claude-opus-4-6
+- **순서**: 계획 먼저(코드 없이) → 검토 후 구현
+- 하드코딩 금지. playwright 자동검증 후 JJ 수동 확인 필수
+
 ## 개발 환경
 | 환경 | 도구 |
 |------|------|
@@ -885,10 +933,13 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         수백mm→False. 검증: `_verify_editroom`·`_verify_specfeedback`(직사각 True·L자 False) 그린.
 - [x] **선택한 방 삭제 — 공유변/전용변 분류로 옆 방 안 깨고 한 방만 제거**(잘못 그린 방을 Ctrl+Z 통째 되돌림
       없이 하나만 삭제). 크기·이동 모드(`designEditMode`)에 삭제 추가. 방은 벽 파생 면이라 "그 방을 닫는 designWall
-      제거"로 구현. ★**공유변 안전**: 선택 방 폴리곤 경계 designWall마다 중점±수직(EPS 100mm) 두 점을
-      `pointInPoly(selected poly)` → `inA!==inB`면 경계벽, 바깥쪽 점이 **다른 방 안=공유변(유지)** / **외부 void=전용변
-      (제거)**. 공유변을 남기면 옆 방이 그 벽으로 닫힌 채 유지되고, 선택 방은 전용변(외부 향한 변)이 사라져 더는
+      제거"로 구현. ★**공유변 안전**: 선택 방 폴리곤 경계 designWall마다 **t=0.1/0.3/0.5/0.7/0.9 다섯 샘플 포인트**
+      중 하나라도 `inA≠inB`면 경계벽 확정, 바깥쪽 점이 **다른 방 안=공유변(유지)** / **외부 void=전용변(제거)**.
+      공유변을 남기면 옆 방이 그 벽으로 닫힌 채 유지되고, 선택 방은 전용변(외부 향한 변)이 사라져 더는
       닫힌 면이 아니라 recompute에서 사라짐. **외곽(designBoundary)은 designWalls와 별도라 루프가 안 건드림**(자동 보존).
+      ★**버그픽스(commit 82094cd)**: 초기 구현(단일 중점 t=0.5)에서 전체 벽 중점이 방 모서리·T접합 좌표와
+        정확히 일치하면 ±EPS 두 점이 모두 경계 바깥에 떨어져 `inA===inB` → 모든 벽이 비경계 분류 → removed=0
+        → 삭제 불가. **다섯 샘플(t=0.1~0.9)로 수정** — 하나라도 경계 양쪽을 감지하면 경계벽 확정.
       `deleteSelectedRoom()`: 잠김 차단 → 전용변 0개면 차단(둘러싸임) → designHistory.push(깊은복사, undo 1단위) →
         삭제 전 designRoomNames에서 그 방 안 이름 항목 제거(유령 이름 방지) → 전용변 제외하고 designWalls 재구성 →
         dedup → recompute → selectedDesignFace=-1 → render+refreshEditPanel+updateDesignActions. 끝에서 designRooms가
@@ -903,13 +954,13 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
       무수정: 직사각형 그리기/이름/크기변경/드래그이동/클릭클릭/고정방/조언·존/규격피드백/`undoDesignWall`/autosave/
         묶기 localStorage/내보내기/renderToBe/`recomputeDesignRooms`/`planarFaces`/`dedupDesignWalls`/beforeunload.
         신규=`deleteSelectedRoom`+버튼/Delete키 핸들러+refreshEditPanel del enable 1줄·HTML 버튼.
-      검증: ①(자동) `_verify_deleteroom.py`(빌라 page3 A세대, **실제 클릭**) — 2.8×2.8 영역에 방 3개(인접쌍 L/R+고립 I)→
-        고립 삭제 시 **designRooms 정확히 1 감소**·L/R 유지·designWalls 감소(11→7)·이름 정리·선택 해제·Ctrl+Z 도형 복원·
-        개수 원복 / 인접 L 삭제 시 **R 면 유지(공유변 보존, 면적 1.69 불변)**·undo 복원 / 잠긴 방 버튼 disabled+Delete 무반응 /
-        Delete 키 삭제·**W 입력칸 포커스 중 Delete 무반응** / 3×3 격자 중앙(둘러싸임) **삭제 불가·history 불변**·에러0.
-        회귀 8종(editroom/rectroom/clickdraw/fixedroom/specfeedback/genlayout/export/autosave) 전부 그린.
+      검증: ①(자동) `_verify_deleteroom.py`(빌라 page3 A세대, **실제 클릭**) — 방 3개(인접쌍 L/R+고립 I)→
+        고립 삭제: **designRooms 정확히 1 감소**·L/R 유지·designWalls 감소(11→7)·이름 정리·Ctrl+Z 도형 복원 /
+        인접 L 삭제: **R 면 유지(공유변 보존, 면적 1.69 불변)**·undo 복원 / 잠긴 방: 버튼 disabled+Delete 무반응 /
+        Delete 키 삭제·**W 입력칸 포커스 중 Delete 무반응** / 3×3 격자 중앙(둘러싸임): **삭제 불가·history 불변**·에러0.
+        회귀 8종(editroom/rectroom/clickdraw/fixedroom/specfeedback/genlayout/export/autosave) 전부 통과. **검증 완료.**
       ②(JJ 수동·필수) 방 여러 개 그리고 하나 선택 삭제→그 방만 사라지고 나머지 유지·이름 정리·Ctrl+Z 도형 복원·잠긴 방
-        삭제 안 됨. **빌라**(+오피스텔 있으면). 통과 전 미완료.
+        삭제 안 됨. **빌라**(+오피스텔 있으면). 자동검증 통과, JJ 브라우저 확인 대기.
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)
