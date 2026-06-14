@@ -88,7 +88,7 @@ with sync_playwright() as pw:
     page.wait_for_function("designBoundary && designGroup && designUnit==='A'", timeout=20000)
 
     # ── 1. 버튼 활성 ──
-    disabled = page.evaluate("document.getElementById('btn-design-advice').disabled")
+    disabled = page.evaluate("document.getElementById('btn-advice').disabled")
     print(f"[1 버튼] disabled={disabled} (False여야)")
     assert disabled is False, "designBoundary 있는데 조언 버튼 비활성"
 
@@ -97,10 +97,10 @@ with sync_playwright() as pw:
     page.fill("#gen-rooms", "3")
     page.fill("#gen-baths", "1")
     walls_before = page.evaluate("designWalls.length")
-    page.click("#btn-design-advice")
-    page.wait_for_function("document.getElementById('design-advice-response').textContent.includes('남향')", timeout=15000)
+    page.click("#btn-advice")
+    page.wait_for_function("document.getElementById('advice-response').textContent.includes('남향')", timeout=15000)
     body1 = captured[-1]
-    rendered = page.evaluate("document.getElementById('design-advice-response').textContent")
+    rendered = page.evaluate("document.getElementById('advice-response').textContent")
     walls_after = page.evaluate("designWalls.length")
     print(f"[2 body] keys={sorted(body1.keys())}")
     print(f"   orientation={body1.get('building_orientation')} bedrooms={body1.get('bedrooms')} baths={body1.get('baths')} trend={body1.get('trend')!r}")
@@ -127,7 +127,7 @@ with sync_playwright() as pw:
     # 트렌드 입력해서 다시 조언
     page.fill("#design-trend-input", "요즘 4베이 선호")
     n_before = len(captured)
-    page.click("#btn-design-advice")
+    page.click("#btn-advice")
     page.wait_for_timeout(900)
     assert len(captured) > n_before, "두 번째 조언 요청이 안 나감"
     body2 = captured[-1]

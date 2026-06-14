@@ -533,13 +533,6 @@
         </div>
         <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
         <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
-          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">💡 설계 시작 조언 (AI가 형상·방위·구성을 보고 글로만 조언 — 벽은 직접 그립니다)</div>
-          <textarea id="design-trend-input" placeholder="(선택) 시장/트렌드·요구를 붙여넣으면 반영 — 예: buji-terminal 정보, '요즘 4베이 선호'. 비워도 됩니다."
-            style="width:100%; box-sizing:border-box; min-height:46px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
-          <button class="btn-secondary" id="btn-design-advice" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>💡 어떻게 설계할까?</button>
-          <div id="design-advice-response" style="display:none; margin-top:8px; padding:8px; background:#0f1116; border:1px solid #2a2a35; border-radius:6px; color:#dcdce4; font-size:12px; line-height:1.55; white-space:pre-wrap; max-height:280px; overflow-y:auto;"></div>
-        </div>
-        <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
           <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
           <label style="display:block; font-size:11px; color:#bbb; margin-bottom:6px;">도면 위쪽 방위 (채광·배치 강화 — 모르면 '모름')
             <select id="design-orientation-select"
@@ -616,6 +609,9 @@
           <button class="action-btn btn-primary" id="btn-lock-fixed" style="width:100%; margin-top:8px; padding:9px;" disabled>🔒 고정으로 잠금</button>
         </div>
         <div id="design-fix-list" style="display:none; font-size:12px; color:#ddd;"></div>
+        <!-- 트렌드/시장 정보 — 설계 조언 요청 시 반영 -->
+        <textarea id="design-trend-input" placeholder="buji-terminal 등 시장/트렌드 정보 (선택)"
+          style="width:100%; box-sizing:border-box; min-height:46px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
       </div>
       <div class="edit-hint" id="design-hint" style="display:none;">
         내벽이 사라진 빈 외곽에 <b>시작점 클릭 → 끝점 클릭</b>으로 벽을 그으세요(드래그 아님).
@@ -2435,10 +2431,14 @@ async function enterDesignMode(unit) {
     designGroup.add(mesh);
   }
   renderDesignWalls(); renderDesignRooms();
+  const ai = document.getElementById("advice-input");
+  if (ai) ai.placeholder = "buji-terminal 등 시장/트렌드·설계 요청사항 (선택) — 설계 조언 요청 시 반영";
   return true;
 }
 
 function exitDesignMode() {
+  const ai = document.getElementById("advice-input");
+  if (ai) ai.placeholder = "예: 안방을 남향으로 옮기면 어때? / 화장실 위치가 동선상 비효율적인데 어디가 나을까?";
   autosaveDesign();   // 규칙2: 저장 안 한 작업을 종료 전 자동 보관 (무파괴 모드 전환)
   if (designGroup && roomScene) {
     designGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
@@ -2597,7 +2597,12 @@ async function requestDesignAdvice() {
   const orientation = (dOri && dOri.value) || (document.getElementById("orientation-select") || {}).value || "모름";
   const roomsVal = document.getElementById("gen-rooms").value.trim();
   const bathsVal = document.getElementById("gen-baths").value.trim();
-  const trend = document.getElementById("design-trend-input").value.trim();
+  // 트렌드: 설계 전용 textarea(design-actions 안) + 공용 질문 textarea 합산
+  const trendParts = [
+    (document.getElementById("advice-input") || {}).value || "",
+    (document.getElementById("design-trend-input") || {}).value || "",
+  ].map(s => s.trim()).filter(Boolean);
+  const trend = trendParts.join("\n").slice(0, 2000);
   const body = {
     boundary_mm: designBoundary.map(p => p.slice()),
     unit: designUnit,
@@ -2613,8 +2618,8 @@ async function requestDesignAdvice() {
   if (roomsVal !== "") body.bedrooms = parseInt(roomsVal, 10);
   if (bathsVal !== "") body.baths = parseInt(bathsVal, 10);
 
-  const btn = document.getElementById("btn-design-advice");
-  const box = document.getElementById("design-advice-response");
+  const btn = document.getElementById("btn-advice");
+  const box = document.getElementById("advice-response");
   const prevTxt = btn.textContent;
   btn.disabled = true; btn.textContent = "💡 조언 작성 중…";
   box.style.display = "block";
@@ -2628,7 +2633,7 @@ async function requestDesignAdvice() {
     if (!res.ok) throw new Error((await res.text()).slice(0, 200));
     const data = await res.json();
     box.textContent = data.answer || "(응답 없음)";
-    showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언을 받았습니다. 보고 직사각형 방 도구로 직접 그리세요.`, "ok");
+    showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언 완료. 보고 방 도구로 직접 그리세요.`, "ok");
   } catch (err) {
     box.textContent = "";
     box.style.display = "none";
@@ -2721,8 +2726,6 @@ function updateDesignActions() {
   if (wrap) wrap.style.display = designMode ? "flex" : "none";
   const gl = document.getElementById("btn-generate-layout");
   if (gl) gl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
-  const da = document.getElementById("btn-design-advice");
-  if (da) da.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const u = document.getElementById("btn-undo-design");
   const cl = document.getElementById("btn-clear-design");
   const rv = document.getElementById("btn-revert-design");
@@ -2798,7 +2801,6 @@ document.getElementById("btn-clear-design").addEventListener("click", clearDesig
 document.getElementById("btn-revert-design").addEventListener("click", revertDesignToOriginal);
 document.getElementById("btn-save-design").addEventListener("click", saveDesign);
 document.getElementById("btn-generate-layout").addEventListener("click", generateLayout);
-document.getElementById("btn-design-advice").addEventListener("click", requestDesignAdvice);
 // 방위 셀렉트 양방향 동기화 (설계 패널 ↔ AI 조언 섹션): 어느 쪽을 바꿔도 일치
 (function syncOrientationSelects() {
   const a = document.getElementById("design-orientation-select");
@@ -2976,6 +2978,7 @@ document.querySelectorAll(".advice-chip").forEach(chip => {
 });
 
 async function requestAdvice() {
+  if (designMode) { requestDesignAdvice(); return; }   // 설계 모드에선 설계 맥락 조언으로 위임
   if (!parsedData) { showStatus("먼저 PDF를 업로드/파싱하세요.", "error"); return; }
   const question = document.getElementById("advice-input").value.trim();
   if (!question) { showStatus("질문을 입력하세요.", "error"); return; }
@@ -3018,9 +3021,14 @@ async function requestAdvice() {
   }
 }
 
-document.getElementById("btn-advice").addEventListener("click", requestAdvice);
+document.getElementById("btn-advice").addEventListener("click", () => {
+  if (designMode) requestDesignAdvice(); else requestAdvice();
+});
 document.getElementById("advice-input").addEventListener("keydown", e => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); requestAdvice(); }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    if (designMode) requestDesignAdvice(); else requestAdvice();
+  }
 });
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────
