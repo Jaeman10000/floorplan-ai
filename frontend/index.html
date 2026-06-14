@@ -592,6 +592,7 @@
             </label>
           </div>
           <button class="action-btn btn-primary" id="btn-apply-size" style="width:100%; margin-top:8px; padding:9px;" disabled>📐 크기 적용</button>
+          <button class="action-btn" id="btn-delete-room" style="width:100%; margin-top:6px; padding:9px; background:#7f1d1d; color:#fecaca; border:1px solid #b91c1c;" disabled>🗑 이 방 삭제 (Delete)</button>
           <div id="edit-rect-note" style="display:none; font-size:10px; color:#e0a; margin-top:5px;">⚠️ 비직사각형 방은 크기 변경 불가(드래그 이동만 가능).</div>
           <div style="font-size:10px; color:#7d7d8a; margin-top:6px; line-height:1.5;">
             방 위를 <b>좌드래그</b>하면 이동(100mm 격자), 빈 곳 좌드래그=카메라. 크기는 <b>왼쪽아래 모서리 고정</b>.<br>
@@ -2627,6 +2628,7 @@ function refreshEditPanel() {
   const wIn = document.getElementById("edit-w-input");
   const hIn = document.getElementById("edit-h-input");
   const ap = document.getElementById("btn-apply-size");
+  const del = document.getElementById("btn-delete-room");
   const info = document.getElementById("edit-sel-info");
   const note = document.getElementById("edit-rect-note");
   if (!panel) return;
@@ -2636,22 +2638,25 @@ function refreshEditPanel() {
     if (wIn) { wIn.value = ""; wIn.disabled = true; }
     if (hIn) { hIn.value = ""; hIn.disabled = true; }
     if (ap) ap.disabled = true;
+    if (del) del.disabled = true;   // 선택 없음 → 삭제 비활성
     if (note) note.style.display = "none";
     return;
   }
   if (rm.locked) {
-    if (info) info.textContent = `🔒 ${rm.name || "고정"} (${rm.area_m2}㎡) — 잠긴 방은 크기 변경 불가(고정 해제 후).`;
+    if (info) info.textContent = `🔒 ${rm.name || "고정"} (${rm.area_m2}㎡) — 잠긴 방은 크기·삭제 불가(고정 해제 후).`;
     if (wIn) { wIn.value = ""; wIn.disabled = true; }
     if (hIn) { hIn.value = ""; hIn.disabled = true; }
     if (ap) ap.disabled = true;
+    if (del) del.disabled = true;   // 잠긴 방 → 삭제 차단
     if (note) note.style.display = "none";
     return;
   }
   const d = roomDims(rm.poly, rm.area_m2);
-  if (info) info.textContent = `${rm.name || "이름없음"} (${rm.area_m2}㎡) — 드래그로 이동 / 숫자로 크기 변경`;
+  if (info) info.textContent = `${rm.name || "이름없음"} (${rm.area_m2}㎡) — 드래그로 이동 / 숫자로 크기 변경 / 🗑 삭제`;
   if (wIn) { wIn.value = Math.round(d.W); wIn.disabled = !d.isRect; }
   if (hIn) { hIn.value = Math.round(d.H); hIn.disabled = !d.isRect; }
   if (ap) ap.disabled = !d.isRect;
+  if (del) del.disabled = false;   // 선택 있고 안 잠김 → 삭제 활성(비직사각도 삭제는 가능)
   if (note) note.style.display = d.isRect ? "none" : "block";
 }
 
@@ -2758,6 +2763,65 @@ function finishEditDrag() {
   renderDesignWalls(); renderDesignRooms();
   refreshEditPanel(); updateDesignActions();
   showStatus("방을 이동했습니다.", "ok");
+}
+
+// 선택한 방 삭제 — 경계 designWall을 공유변/전용변으로 분류해 전용변만 제거.
+// 공유변(바깥쪽이 다른 방)은 유지 → 옆 방이 그 벽으로 닫혀 안 깨짐.
+// 전용변(바깥쪽이 외부 void)만 제거 → 선택 방이 더 이상 닫힌 면이 아니게 됨 → recompute에서 사라짐.
+function deleteSelectedRoom() {
+  if (selectedDesignFace < 0 || !designRooms[selectedDesignFace]) {
+    showStatus("먼저 삭제할 방을 클릭하세요.", "error"); return;
+  }
+  const rm = designRooms[selectedDesignFace];
+  if (rm.locked) {
+    showStatus("잠긴 방은 삭제 불가 — 목록에서 🔓 해제 후 삭제하세요.", "info"); return;
+  }
+  const poly = rm.poly;
+  const EPS = 100;   // 중점에서 수직으로 띄울 거리(mm). NODE_TOL(50)보다 커서 면 안/밖 명확.
+  const before = designRooms.length;
+  const keepIdx = [];   // 남길 designWall 인덱스
+  let removed = 0;
+  for (let wi = 0; wi < designWalls.length; wi++) {
+    const w = designWalls[wi];
+    const ax = w.a[0], ay = w.a[1], bx = w.b[0], by = w.b[1];
+    const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+    if (L < 1) { keepIdx.push(wi); continue; }   // 퇴화 벽은 그냥 둠(dedup이 처리)
+    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const nx = -dy / L, ny = dx / L;             // 단위 수직
+    const pa = [mx + nx * EPS, my + ny * EPS];
+    const pb = [mx - nx * EPS, my - ny * EPS];
+    const inA = pointInPoly(pa, poly), inB = pointInPoly(pb, poly);
+    if (inA === inB) { keepIdx.push(wi); continue; }   // 이 방 경계벽 아님(내부 댕글링/무관)
+    const outPt = inA ? pb : pa;                  // 방 바깥쪽 점
+    // 바깥쪽이 다른 방 안이면 공유변 → 유지. 외부 void면 전용변 → 삭제.
+    let shared = false;
+    for (let ri = 0; ri < designRooms.length; ri++) {
+      if (ri === selectedDesignFace) continue;
+      if (pointInPoly(outPt, designRooms[ri].poly)) { shared = true; break; }
+    }
+    if (shared) keepIdx.push(wi); else removed++;
+  }
+  if (removed === 0) {
+    // 전용변이 하나도 없음 = 모든 변을 옆 방과 공유(완전히 둘러싸임) → 단독 삭제 불가.
+    showStatus("이 방은 모든 변을 옆 방과 공유해 단독 삭제할 수 없습니다 (옆 방을 먼저 정리하세요).", "info");
+    return;
+  }
+  designHistory.push(designWalls.map(w => ({ a: w.a.slice(), b: w.b.slice() })));
+  if (designHistory.length > 50) designHistory.shift();
+  // 이름 정리: 삭제 방 안 이름 항목 제거(유령 이름 방지). ⚠️ undo는 도형만 복원·이름 안 복원.
+  designRoomNames = designRoomNames.filter(rn => !pointInPoly([rn.cx, rn.cy], poly));
+  designWalls = keepIdx.map(i => designWalls[i]);
+  dedupDesignWalls();
+  recomputeDesignRooms();
+  selectedDesignFace = -1;
+  renderDesignWalls(); renderDesignRooms();
+  refreshEditPanel(); updateDesignActions();
+  const after = designRooms.length;
+  if (after === before - 1)
+    showStatus(`🗑 방을 삭제했습니다 (전용변 ${removed}개 제거). Ctrl+Z로 도형 복원.`, "ok");
+  else
+    // 전용변을 지웠는데도 다른 벽들이 면을 다시 닫아 1개 줄지 않은 경우(한계) — 로그.
+    showStatus(`🗑 벽 ${removed}개 제거 (방 ${before}→${after}개). 면이 남으면 남은 경계벽을 확인하세요.`, "info");
 }
 
 // 고정 모드에서 면 선택 (raycast 결과 faceIdx)
@@ -3416,6 +3480,7 @@ document.getElementById("btn-rect-mode").addEventListener("click", () => setRect
 document.getElementById("btn-name-mode").addEventListener("click", () => setNameMode(!designNameMode));
 document.getElementById("btn-edit-mode").addEventListener("click", () => setEditMode(!designEditMode));
 document.getElementById("btn-apply-size").addEventListener("click", applyRoomSize);
+document.getElementById("btn-delete-room").addEventListener("click", deleteSelectedRoom);
 ["edit-w-input", "edit-h-input"].forEach(id =>
   document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); applyRoomSize(); } }));
 document.getElementById("btn-apply-name").addEventListener("click", applyDesignRoomName);
@@ -3433,6 +3498,10 @@ window.addEventListener("keydown", e => {
     e.preventDefault(); undoDesignWall();
   } else if (designMode && e.key === "Escape" && (drawStart || rectStart)) {
     e.preventDefault(); if (rectStart) cancelRect(); else cancelDraw();
+  } else if (designMode && designEditMode && e.key === "Delete" &&
+             selectedDesignFace >= 0 && e.target.tagName !== "INPUT") {
+    // Delete 키 = 선택 방 삭제. W/H 입력칸 포커스 중엔 무반응(숫자 편집 보호).
+    e.preventDefault(); deleteSelectedRoom();
   }
 });
 
