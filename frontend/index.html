@@ -533,6 +533,13 @@
         </div>
         <div id="design-info" style="font-size:12px; color:#ddd; margin-top:8px;">벽 0개 · 방 0개</div>
         <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
+          <div style="font-size:11px; color:#9aa; margin-bottom:6px;">💡 설계 시작 조언 (AI가 형상·방위·구성을 보고 글로만 조언 — 벽은 직접 그립니다)</div>
+          <textarea id="design-trend-input" placeholder="(선택) 시장/트렌드·요구를 붙여넣으면 반영 — 예: buji-terminal 정보, '요즘 4베이 선호'. 비워도 됩니다."
+            style="width:100%; box-sizing:border-box; min-height:46px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
+          <button class="btn-secondary" id="btn-design-advice" style="width:100%; margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" disabled>💡 어떻게 설계할까?</button>
+          <div id="design-advice-response" style="display:none; margin-top:8px; padding:8px; background:#0f1116; border:1px solid #2a2a35; border-radius:6px; color:#dcdce4; font-size:12px; line-height:1.55; white-space:pre-wrap; max-height:280px; overflow-y:auto;"></div>
+        </div>
+        <div style="margin-top:10px; padding:8px; background:#161a22; border-radius:8px;">
           <div style="font-size:11px; color:#9aa; margin-bottom:6px;">🤖 AI 구조 초안 (개수는 직접 입력 — 비우면 면적 기준 자동)</div>
           <label style="display:block; font-size:11px; color:#bbb; margin-bottom:6px;">도면 위쪽 방위 (채광·배치 강화 — 모르면 '모름')
             <select id="design-orientation-select"
@@ -2580,6 +2587,61 @@ async function exportPlanPdf() {
   }
 }
 
+// ── 설계 시작 조언 (텍스트만, 벽 생성 안 함) ────────────────────────────────
+// 빈 외곽(+이미 그린 방·고정 방·트렌드)을 백엔드로 보내 AI 전문가 조언을 받아 패널 표시.
+async function requestDesignAdvice() {
+  if (!designMode || !designUnit) { showStatus("설계 모드에서 세대를 선택하세요.", "error"); return; }
+  if (!designBoundary || designBoundary.length < 3) { showStatus("외곽이 없습니다.", "error"); return; }
+
+  const dOri = document.getElementById("design-orientation-select");
+  const orientation = (dOri && dOri.value) || (document.getElementById("orientation-select") || {}).value || "모름";
+  const roomsVal = document.getElementById("gen-rooms").value.trim();
+  const bathsVal = document.getElementById("gen-baths").value.trim();
+  const trend = document.getElementById("design-trend-input").value.trim();
+  const body = {
+    boundary_mm: designBoundary.map(p => p.slice()),
+    unit: designUnit,
+    building_orientation: orientation,
+    fixed_rooms: designFixedRooms.map(fr => ({ name: fr.name, poly: fr.poly.map(p => p.slice()) })),
+    // 지금까지 그린 방(이름·면적·중심) — AI가 이어서 조언하도록
+    current_rooms: designRooms.map(r => {
+      const c = polyCentroid(r.poly);
+      return { name: r.name || "", area_m2: r.area_m2, cx: c[0], cy: c[1] };
+    }),
+    trend,
+  };
+  if (roomsVal !== "") body.bedrooms = parseInt(roomsVal, 10);
+  if (bathsVal !== "") body.baths = parseInt(bathsVal, 10);
+
+  const btn = document.getElementById("btn-design-advice");
+  const box = document.getElementById("design-advice-response");
+  const prevTxt = btn.textContent;
+  btn.disabled = true; btn.textContent = "💡 조언 작성 중…";
+  box.style.display = "block";
+  box.textContent = "🤔 외곽 형상·방위·구성을 보고 설계 조언을 작성 중...";
+  const ctrl = new AbortController();
+  const killer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const res = await fetch(`${API}/api/design-advice`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: ctrl.signal });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    const data = await res.json();
+    box.textContent = data.answer || "(응답 없음)";
+    showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언을 받았습니다. 보고 직사각형 방 도구로 직접 그리세요.`, "ok");
+  } catch (err) {
+    box.textContent = "";
+    box.style.display = "none";
+    showStatus(err.name === "AbortError"
+      ? "설계 조언 시간 초과(60초). 잠시 후 다시 시도하세요."
+      : "설계 조언 실패: " + err.message, "error");
+  } finally {
+    clearTimeout(killer);
+    btn.disabled = false; btn.textContent = prevTxt;
+    updateDesignActions();
+  }
+}
+
 // ── AI 구조 초안 생성 ───────────────────────────────────────────────────────
 // 빈 외곽 + (JJ 입력) 방/화장실 개수 → 백엔드가 AI로 격자·직사각형 내벽 초안 생성.
 // 결과를 designWalls에 주입(기존 벽 있으면 confirm 후 대체). AI 초안=undo 1단위.
@@ -2659,6 +2721,8 @@ function updateDesignActions() {
   if (wrap) wrap.style.display = designMode ? "flex" : "none";
   const gl = document.getElementById("btn-generate-layout");
   if (gl) gl.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
+  const da = document.getElementById("btn-design-advice");
+  if (da) da.disabled = !(designMode && designBoundary && designBoundary.length >= 3);
   const u = document.getElementById("btn-undo-design");
   const cl = document.getElementById("btn-clear-design");
   const rv = document.getElementById("btn-revert-design");
@@ -2734,6 +2798,7 @@ document.getElementById("btn-clear-design").addEventListener("click", clearDesig
 document.getElementById("btn-revert-design").addEventListener("click", revertDesignToOriginal);
 document.getElementById("btn-save-design").addEventListener("click", saveDesign);
 document.getElementById("btn-generate-layout").addEventListener("click", generateLayout);
+document.getElementById("btn-design-advice").addEventListener("click", requestDesignAdvice);
 // 방위 셀렉트 양방향 동기화 (설계 패널 ↔ AI 조언 섹션): 어느 쪽을 바꿔도 일치
 (function syncOrientationSelects() {
   const a = document.getElementById("design-orientation-select");

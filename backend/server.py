@@ -200,6 +200,164 @@ async def ai_advice(payload: dict):
     return JSONResponse({"answer": answer, "context": context})
 
 
+# ─── 설계 시작 조언 (내부 설계 모드 — 텍스트 조언만, 좌표/벽 생성 안 함) ─────────
+
+_DESIGN_ADVICE_SYSTEM = """당신은 한국의 주거 평면 설계 전문가입니다.
+의뢰인은 신축하는 시공업자(JJ)이고, 지금 '빈 외곽'(벽 없는 세대 내부)에 방을 직접 그려 설계하려 합니다.
+당신은 손이 아니라 머리입니다 — 좌표나 벽을 그리지 말고, JJ가 직접 그릴 수 있게 '방향성 있는 텍스트 조언'만 줍니다.
+
+조언 규칙:
+- 정밀 좌표·치수를 단정하지 마세요(예: "거실을 (3200,1500)에" 금지). "남쪽 외벽을 따라 거실을 길게" 같은 방향성으로.
+- 외곽 형상·면적을 먼저 분석: 어디가 주 생활공간(거실 등)으로 적합한지, 어디가 잘려 방 만들기 불리한지.
+- 방위가 있으면 채광 원칙을 구체적으로: 남향 외벽=거실·침실, 북향=욕실·주방·다용도실. 방위가 미상이면 일반 채광 원칙(외벽 접한 면에 거실·침실)으로.
+- 침실 개수가 주어지면 그 기준으로 구성·동선(현관→거실→각 방)·물 쓰는 공간(욕실·주방·다용도) 모으기(배관 효율)를 제안.
+- '이미 고정된 공간'이나 '지금까지 그린 방'이 있으면 그것을 전제로 이어서 조언("거실 15㎡를 그렸으니 다음은 침실을 북동쪽에" 식). 아무것도 없으면 어디서부터 시작할지.
+- 트렌드: JJ가 입력한 트렌드/요구가 있으면 그것을 우선 반영. 없으면 일반 주거 트렌드(알파룸·팬트리·드레스룸 등)만 언급하되 "구체적 최신 시장 트렌드는 별도 확인이 필요합니다"라고 정직하게 밝히세요. 최신 시장 데이터를 지어내지 마세요.
+- 한국어, 불릿 위주, 간결하게. 핵심 5~7줄 이내."""
+
+
+def _classify_shape(boundary):
+    """외곽 ring(mm) → 대략적 형상 라벨 + 원시 수치(단정 아님, AI 보조용)."""
+    from shapely.geometry import Polygon
+    poly = Polygon([(float(x), float(y)) for x, y in boundary])
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    x0, y0, x1, y1 = poly.bounds
+    bw = (x1 - x0) or 1.0
+    bh = (y1 - y0) or 1.0
+    bbox_area = bw * bh
+    fill = (poly.area / bbox_area) if bbox_area else 0.0
+    longside, shortside = max(bw, bh), min(bw, bh)
+    aspect = (longside / shortside) if shortside else 1.0
+    if fill >= 0.85:
+        label = "직사각형에 가까운 정형"
+    elif fill >= 0.55:
+        label = "ㄱ자·요철 등 비정형"
+    else:
+        label = "삼각형·이형(많이 잘린 형태)"
+    if aspect >= 2.0:
+        label += ", 좁고 긴 형태"
+    return {"label": label, "fill": round(fill, 2), "aspect": round(aspect, 2),
+            "vertices": len(boundary), "bw_mm": bw, "bh_mm": bh,
+            "area_m2": round(poly.area / 1e6, 1)}
+
+
+def _build_design_advice_context(boundary, unit, orientation, fixed_rooms,
+                                 bedrooms, baths, current_rooms, trend):
+    """설계 모드 컨텍스트: 형상·크기·방위·안전영역·외곽좌표·구성·고정방·이미 그린 방·트렌드."""
+    from shapely.geometry import Polygon
+    sh = _classify_shape(boundary)
+    bx0 = min(p[0] for p in boundary); by0 = min(p[1] for p in boundary)
+    bx1 = max(p[0] for p in boundary); by1 = max(p[1] for p in boundary)
+
+    lines = [f"[세대] {unit or '미지정'}"]
+    lines.append(f"[외곽 형상] {sh['label']} (채움비율 {sh['fill']}, 종횡비 {sh['aspect']}, 정점 {sh['vertices']}개)")
+    lines.append(f"[크기] 전용면적 약 {sh['area_m2']}㎡, bbox 가로 {round(sh['bw_mm']/1000,2)}m × 세로 {round(sh['bh_mm']/1000,2)}m")
+
+    ed = _edge_directions(orientation)
+    if ed:
+        lines.append(
+            f"[방위] 도면 위쪽={orientation}쪽. 외곽 상단변={ed['top']}, 하단변={ed['bottom']}, "
+            f"좌변={ed['left']}, 우변={ed['right']} (남향 외벽=거실·침실, 북향=물 쓰는 공간 권장)")
+    else:
+        lines.append("[방위] 미상 — 일반 채광 원칙으로 조언 (도면 위쪽 방위를 입력하면 더 정확)")
+
+    try:
+        ir = _max_inscribed_rect(Polygon([(float(x), float(y)) for x, y in boundary]).buffer(0))
+    except Exception:
+        ir = None
+    if ir:
+        iw = (ir[2] - ir[0]) / 1000; ih = (ir[3] - ir[1]) / 1000
+        lines.append(f"[안 잘리는 가장 큰 직사각형 영역] 약 {round(iw,2)}m × {round(ih,2)}m = {round(iw*ih,1)}㎡ (주 생활공간 두기 좋은 영역)")
+
+    coords = ", ".join(f"[{int(round(x))},{int(round(y))}]" for x, y in boundary)
+    lines.append(f"[외곽 폴리곤 좌표(mm)]\n[{coords}]")
+
+    if bedrooms or baths:
+        parts = []
+        if bedrooms: parts.append(f"침실 {bedrooms}개")
+        if baths: parts.append(f"욕실 {baths}개")
+        lines.append(f"[원하는 구성] {', '.join(parts)}")
+    else:
+        lines.append("[원하는 구성] 미지정 (면적·형상에 맞는 적정 구성을 제안)")
+
+    if fixed_rooms:
+        fl = []
+        for fr in fixed_rooms:
+            nm = str(fr.get("name") or "고정방")
+            poly = fr.get("poly") or []
+            if len(poly) >= 3:
+                cx = sum(p[0] for p in poly) / len(poly); cy = sum(p[1] for p in poly) / len(poly)
+                fl.append(f"{nm}({_room_position(cx, cy, bx0, by0, bx1, by1)})")
+            else:
+                fl.append(nm)
+        lines.append(f"[이미 고정된 공간] {', '.join(fl)} — 이 위치를 전제로 나머지를 조언")
+
+    drawn = [r for r in (current_rooms or []) if (r.get("area_m2") or 0) > 0]
+    if drawn:
+        rl = []
+        for r in drawn:
+            nm = (r.get("name") or "").strip() or "(이름없음)"
+            cx, cy = r.get("cx"), r.get("cy")
+            pos = _room_position(cx, cy, bx0, by0, bx1, by1) if (cx is not None and cy is not None) else "위치미상"
+            rl.append(f"{nm}({r.get('area_m2')}㎡, {pos})")
+        lines.append(f"[지금까지 그린 방] {len(drawn)}개: {', '.join(rl)} — 이걸 이어받아 '다음에 무엇을 어디에' 식으로 조언")
+    else:
+        lines.append("[지금까지 그린 방] 없음 (빈 외곽 — 어디서부터 시작할지 조언)")
+
+    t = (trend or "").strip()
+    if t:
+        lines.append(f"[JJ가 입력한 트렌드/요구]\n{t}\n→ 위 내용을 우선 반영해 조언")
+    else:
+        lines.append("[트렌드] JJ 입력 없음 — 일반 주거 트렌드(알파룸·팬트리·드레스룸 등)만 언급하고 '구체적 최신 시장 트렌드는 별도 확인 필요'라고 명시")
+
+    return "\n".join(lines)
+
+
+@app.post("/api/design-advice")
+async def design_advice(payload: dict):
+    """설계 모드 '시작 조언' — 빈 외곽(+이미 그린 방·고정 방·트렌드)을 보고 AI가 텍스트 조언만.
+    좌표·벽 생성 안 함(generate-layout과 별개). 기존 ai-advice 무수정."""
+    boundary = payload.get("boundary_mm") or []
+    if len(boundary) < 3:
+        raise HTTPException(400, "boundary_mm 좌표가 3개 미만입니다.")
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY가 설정되지 않았습니다 (backend/.env 확인).")
+
+    unit = (payload.get("unit") or "").strip() or None
+    orientation = (payload.get("building_orientation") or "").strip() or None
+    fixed_rooms = payload.get("fixed_rooms") or []
+    current_rooms = payload.get("current_rooms") or []
+
+    def _as_int(v):
+        try:
+            n = int(v)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+    bedrooms = _as_int(payload.get("bedrooms"))
+    baths = _as_int(payload.get("baths"))
+    trend = (payload.get("trend") or "").strip()[:2000]   # 길이 cap
+
+    context = _build_design_advice_context(
+        boundary, unit, orientation, fixed_rooms, bedrooms, baths, current_rooms, trend)
+
+    try:
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=1200,
+            system=_DESIGN_ADVICE_SYSTEM,
+            messages=[{"role": "user", "content": context}],
+        )
+        answer = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    except Exception as e:
+        raise HTTPException(500, f"설계 조언 생성 실패: {str(e)}")
+
+    return JSONResponse({"answer": answer, "context": context})
+
+
 @app.post("/api/unit-boundary")
 async def unit_boundary(payload: dict):
     """세대 방 폴리곤들을 합쳐 '빈 외곽'(봉투) 하나를 반환 — 내부 설계 모드 진입용.

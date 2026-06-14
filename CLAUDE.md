@@ -701,6 +701,40 @@ AI는 "거실을 넓혀라" 같은 **판단**은 잘하지만, "벽을 (3200,150
         _verify_fixedlayout 전부 그린 + PDF 이름 백엔드 스모크(거실 추출 OK). ②(JJ 수동·필수) 직사각형으로
         방 여러 개(인접 포함)→이름 붙이기(드롭다운+직접입력)→저장·재진입 유지→PNG/PDF 내보내기(이름
         보이는지)→Ctrl+Z→클릭-클릭 벽과 혼용. **오피스텔도 1회**. 통과 전 미완료.
+- [x] **설계 시작 조언 — `POST /api/design-advice`(AI=머리/조언 텍스트만, 손=JJ)**. 설계 모드 진입
+      시 빈 외곽뿐이라 어디서 시작할지 난감 → AI가 좌표/벽을 그리는 대신(계속 실패) **전문가 배치 조언을
+      텍스트로만** 주고 JJ가 그 조언을 보고 직사각형 방 도구로 직접 그림. generate-layout·ai-advice 무수정.
+      **신규 엔드포인트**(기존 ai-advice는 rooms 필수·As-Is 시스템프롬프트라 재사용 부적합 → 신규):
+        입력 `boundary_mm`(필수,<3→400)·`unit`·`building_orientation`·`fixed_rooms[{name,poly}]`·
+        `bedrooms`/`baths`(선택)·`trend`(자유텍스트, [:2000] cap)·`current_rooms[{name,area_m2,cx,cy}]`
+        (★JJ가 이미 그린 방). `_build_design_advice_context` + `_DESIGN_ADVICE_SYSTEM`으로 claude-sonnet-4-6
+        1회(재생성 없음 — 조언은 텍스트). `{answer, context}` 반환. 키 없으면 500.
+      **형상 판정 `_classify_shape`**(대략, 단정 아님): 채움비율(면적/bbox)≥0.85=정형 / 0.55~0.85=ㄱ자·요철
+        비정형 / <0.55=삼각형·이형, 종횡비≥2면 "좁고 긴" 부가. 라벨+원시수치(채움·종횡비·정점수·bbox)+
+        **외곽 폴리곤 좌표**+**`_max_inscribed_rect` 안 잘리는 큰 직사각형(주 생활공간 영역)**+
+        **`_edge_directions` 방위 라벨**(남=상단변 등)을 전부 AI에 줘 AI가 최종 판단.
+      **조언 내용**(`_DESIGN_ADVICE_SYSTEM`): ①형상·면적→주 생활공간 적합 위치 ②방위 채광(남=거실/침실,
+        북=물공간; 모르면 일반 채광 원칙) ③침실N 구성·동선(현관→거실→방)·물공간 모으기 ④**트렌드 경계**:
+        JJ 입력 있으면 우선 반영, 없으면 일반 트렌드(알파룸·팬트리·드레스룸)만 언급+"구체적 최신 시장
+        트렌드는 별도 확인 필요" 정직 명시(지어내기 금지) ⑤고정 방·**이미 그린 방 전제로 이어서 조언**
+        ("거실 15㎡ 그렸으니 다음은 침실을 북동쪽에" 식). 정밀 좌표·치수 단정 금지(방향성만). 한국어·불릿.
+      **프런트**: 설계 패널에 "💡 설계 시작 조언" 박스(trend textarea + `btn-design-advice` + 읽기용
+        `design-advice-response`). 방위·개수는 기존 입력(design-orientation-select·gen-rooms·gen-baths)
+        재사용. `requestDesignAdvice()`=boundary·방위·fixed·개수·trend·**current_rooms(designRooms 중심좌표)**
+        전송→텍스트만 렌더, **designWalls 불변**(벽 생성 안 함), 로딩+AbortController(60s). `updateDesignActions`에
+        버튼 활성 1줄(designBoundary≥3) 추가.
+      무수정: generate-layout·직사각형 방·이름·클릭-클릭·고정방·undo·autosave·묶기 localStorage·내보내기·
+        renderToBe·beforeunload·**기존 ai-advice**(`_ADVICE_SYSTEM`/`_build_advice_context`).
+      검증: ①(자동) `_verify_design_advice_backend.py` 22/22 — `_classify_shape`(정형/비정형/이형·종횡비·면적)·
+        `_build_design_advice_context`(면적·bbox·방위 남→상단변=남·내접영역·구성·고정방·**그린 방 반영(area0
+        제외)**·트렌드 유무 분기)·입력검증(boundary<3→400·trend cap·키없음 500). ②(자동) `_verify_design_advice.py`
+        (빌라 A세대, **실제 클릭** + page.route 목) — 버튼 활성·요청 body에 boundary/orientation/fixed/개수/
+        trend/current_rooms 실림·목 응답 패널 렌더·**designWalls 0 유지**·빈 트렌드 동작·직사각형 1개 그린 뒤
+        재요청 시 current_rooms 반영·에러0. 회귀 _verify_rectroom/_verify_clickdraw/_verify_fixedroom/
+        _verify_genlayout/_verify_export/_verify_autosave 전부 그린. ③(실제 키 스모크) A세대 ㄱ자 방위 남+거실
+        18㎡+트렌드 "4베이/팬트리" → 형상·남향·그린 방·개수·트렌드 모두 반영한 방향성 조언 확인(좌표 단정 없음).
+      ④(JJ 수동·필수, 실제 키) A세대(ㄱ자) 방위 남 조언→형상·방위·개수 반영·트렌드 입력 반영·빈 입력 단서·
+        벽 안 그려짐 / 방 몇 개 그린 뒤 다시 조언→이어서 조언하는지 / **오피스텔(정형)로도 1회**. 통과 전 미완료.
 - [ ] **채광 정밀화(경계벽 제외)**: 세대 묶기로 옆세대와 맞붙는 변을 외벽에서 빼고 채광 판정.
 - [ ] (구 구조편집 2단계 아이디어) 그리드 스냅·연속 체이닝·벽 두께(외벽>내벽)
 - [ ] 잠긴 방 위 그리기 가드(면 쪼개기 방지)
