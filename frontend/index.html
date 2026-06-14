@@ -310,23 +310,54 @@
     }
     #btn-advice:disabled { opacity: 0.35; cursor: not-allowed; }
     #btn-advice:not(:disabled):hover { background: #8b5cf6; }
-    #advice-response {
+    /* 설계 조언 모달 */
+    #advice-modal-overlay {
       display: none;
-      margin-top: 10px;
-      background: #15131d;
-      border: 1px solid #2e2640;
-      border-left: 3px solid #7c3aed;
-      border-radius: 8px;
-      padding: 12px;
-      font-size: 12px;
-      line-height: 1.65;
-      color: #d8d2e8;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 360px;
-      overflow-y: auto;
+      position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.65);
+      align-items: center; justify-content: center;
     }
-    #advice-response .advice-loading { color: #c4b5fd; }
+    #advice-modal-overlay.open { display: flex; }
+    #advice-modal {
+      background: #15131d;
+      border: 1px solid #4c1d95;
+      border-radius: 12px;
+      width: 600px; max-width: 92vw;
+      max-height: 80vh;
+      display: flex; flex-direction: column;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.7);
+    }
+    #advice-modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px 10px;
+      border-bottom: 1px solid #2e2640;
+      flex-shrink: 0;
+    }
+    #advice-modal-title { font-size: 14px; font-weight: 700; color: #c4b5fd; }
+    #advice-modal-close {
+      background: none; border: none; color: #aaa;
+      font-size: 20px; cursor: pointer; line-height: 1;
+      padding: 2px 6px; border-radius: 4px;
+    }
+    #advice-modal-close:hover { color: #fff; background: #2e2640; }
+    #advice-modal-body {
+      flex: 1; overflow-y: auto;
+      padding: 16px 18px;
+      font-size: 13px; line-height: 1.7; color: #d8d2e8;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    #advice-modal-body h3 { font-size: 13px; font-weight: 700; color: #c4b5fd; margin: 12px 0 4px; }
+    #advice-modal-body ul { margin: 4px 0 4px 16px; padding: 0; }
+    #advice-modal-footer {
+      padding: 12px 18px;
+      border-top: 1px solid #2e2640;
+      flex-shrink: 0; text-align: right;
+    }
+    #advice-modal-footer button {
+      padding: 8px 22px; border-radius: 8px; font-size: 13px; font-weight: 600;
+      background: #4c1d95; color: #fff; border: none; cursor: pointer;
+    }
+    #advice-modal-footer button:hover { background: #5b21b6; }
 
     /* 방 이름 수정 패널 */
     #room-edit-section {
@@ -532,7 +563,6 @@
           <textarea id="design-trend-input" placeholder="예: 이 동네 30대 신혼부부 많음, 방2개 선호 / buji-terminal 분석 결과 붙여넣기"
             style="width:100%; box-sizing:border-box; min-height:54px; padding:6px; border-radius:6px; border:1px solid #333; background:#0f1116; color:#eee; font-size:12px; resize:vertical;"></textarea>
           <button id="btn-advice" disabled style="margin-top:8px; padding:9px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; background:#7c3aed; color:#fff; border:none; width:100%;">💡 AI에게 설계 조언 받기</button>
-          <div id="advice-response"></div>
         </div>
         <!-- ② 서브모드 3개 (상호배타): 직사각형 방 그리기 / 방 이름 / 고정 방 -->
         <div style="display:flex; gap:6px;">
@@ -1223,6 +1253,7 @@ function attachOrbit(renderer, camera, cx, cz, maxDist) {
   }
   updateCamera();
   renderer.domElement.addEventListener("mousedown", e => {
+    if (_adviceModalOpen) return;               // 모달 열림: 캔버스 조작 비활성
     if (designMode && e.button === 0) return;   // 설계 모드: 좌버튼은 그리기 전용(우버튼만 카메라)
     isDragging = true; isRightDrag = e.button === 2; prevMouse = { x: e.clientX, y: e.clientY };
   });
@@ -1333,6 +1364,7 @@ function renderOutline(panelId, phId, ptsMm, key) {
   updateCamera();
 
   renderer.domElement.addEventListener("mousedown", e => {
+    if (_adviceModalOpen) return;               // 모달 열림: 캔버스 조작 비활성
     isDragging   = true;
     isRightDrag  = e.button === 2;
     prevMouse    = {x: e.clientX, y: e.clientY};
@@ -1838,6 +1870,7 @@ window.addEventListener("mouseup", e => {
   }
   if (e.button === 2) { _rightDownXY = null; return; }
   if (e.button !== 0 || !designMode || !_drawDownXY) return;
+  if (_adviceModalOpen) { _drawDownXY = null; return; }  // 모달 열림: 그리기 클릭 무시
   const moved = Math.hypot(e.clientX - _drawDownXY.x, e.clientY - _drawDownXY.y);
   _drawDownXY = null;
   if (moved > _CLICK_MAX_PX) return;   // 드래그였음 → 점 안 찍음(손떨림·미세이동 무시)
@@ -2584,6 +2617,36 @@ async function exportPlanPdf() {
   }
 }
 
+// ── 설계 조언 모달 ──────────────────────────────────────────────────────────
+let _adviceModalOpen = false;
+
+function openAdviceModal(text) {
+  const overlay = document.getElementById("advice-modal-overlay");
+  const body    = document.getElementById("advice-modal-body");
+  const title   = document.getElementById("advice-modal-title");
+  if (!overlay || !body) return;
+  title.textContent = `💡 설계 조언 — ${UNIT_LABELS[designUnit] || designUnit}`;
+  body.textContent = text;   // pre-wrap CSS handles line breaks
+  overlay.classList.add("open");
+  _adviceModalOpen = true;
+}
+
+function closeAdviceModal() {
+  const overlay = document.getElementById("advice-modal-overlay");
+  if (overlay) overlay.classList.remove("open");
+  _adviceModalOpen = false;
+}
+
+// 모달 이벤트 연결 — 모달 HTML이 스크립트 블록 뒤에 있어 load 이후 실행
+window.addEventListener("load", function initAdviceModal() {
+  const overlay = document.getElementById("advice-modal-overlay");
+  if (!overlay) return;
+  document.getElementById("advice-modal-close").addEventListener("click", closeAdviceModal);
+  document.getElementById("advice-modal-btn-close").addEventListener("click", closeAdviceModal);
+  overlay.addEventListener("click", e => { if (e.target === overlay) closeAdviceModal(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && _adviceModalOpen) closeAdviceModal(); });
+});
+
 // ── 설계 시작 조언 (텍스트만, 벽 생성 안 함) ────────────────────────────────
 // 빈 외곽(+이미 그린 방·고정 방·트렌드)을 백엔드로 보내 AI 전문가 조언을 받아 패널 표시.
 async function requestDesignAdvice() {
@@ -2616,11 +2679,8 @@ async function requestDesignAdvice() {
   if (bathsVal !== "") body.baths = parseInt(bathsVal, 10);
 
   const btn = document.getElementById("btn-advice");
-  const box = document.getElementById("advice-response");
   const prevTxt = btn.textContent;
   btn.disabled = true; btn.textContent = "💡 조언 작성 중…";
-  box.style.display = "block";
-  box.textContent = "🤔 외곽 형상·방위·구성을 보고 설계 조언을 작성 중...";
   const ctrl = new AbortController();
   const killer = setTimeout(() => ctrl.abort(), 60000);
   try {
@@ -2629,11 +2689,9 @@ async function requestDesignAdvice() {
       body: JSON.stringify(body), signal: ctrl.signal });
     if (!res.ok) throw new Error((await res.text()).slice(0, 200));
     const data = await res.json();
-    box.textContent = data.answer || "(응답 없음)";
+    openAdviceModal(data.answer || "(응답 없음)");
     showStatus(`💡 ${UNIT_LABELS[designUnit]} 설계 조언 완료. 보고 방 도구로 직접 그리세요.`, "ok");
   } catch (err) {
-    box.textContent = "";
-    box.style.display = "none";
     showStatus(err.name === "AbortError"
       ? "설계 조언 시간 초과(60초). 잠시 후 다시 시도하세요."
       : "설계 조언 실패: " + err.message, "error");
@@ -2983,5 +3041,17 @@ function showProgress(show) {
   document.getElementById("progress-bar").style.display = show ? "block" : "none";
 }
 </script>
+
+<!-- 설계 조언 모달 -->
+<div id="advice-modal-overlay">
+  <div id="advice-modal">
+    <div id="advice-modal-header">
+      <span id="advice-modal-title">💡 설계 조언</span>
+      <button id="advice-modal-close" title="닫기">×</button>
+    </div>
+    <div id="advice-modal-body"></div>
+    <div id="advice-modal-footer"><button id="advice-modal-btn-close">닫기</button></div>
+  </div>
+</div>
 </body>
 </html>

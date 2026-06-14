@@ -98,22 +98,31 @@ with sync_playwright() as pw:
     page.fill("#gen-baths", "1")
     walls_before = page.evaluate("designWalls.length")
     page.click("#btn-advice")
-    page.wait_for_function("document.getElementById('advice-response').textContent.includes('남향')", timeout=15000)
+    # 결과가 모달 본문에 렌더되는지 확인
+    page.wait_for_function("document.getElementById('advice-modal-body').textContent.includes('남향')", timeout=15000)
     body1 = captured[-1]
-    rendered = page.evaluate("document.getElementById('advice-response').textContent")
+    rendered = page.evaluate("document.getElementById('advice-modal-body').textContent")
+    modal_open = page.evaluate("document.getElementById('advice-modal-overlay').classList.contains('open')")
     walls_after = page.evaluate("designWalls.length")
     print(f"[2 body] keys={sorted(body1.keys())}")
     print(f"   orientation={body1.get('building_orientation')} bedrooms={body1.get('bedrooms')} baths={body1.get('baths')} trend={body1.get('trend')!r}")
     print(f"   boundary_len={len(body1.get('boundary_mm') or [])} fixed={len(body1.get('fixed_rooms') or [])} current={len(body1.get('current_rooms') or [])}")
-    print(f"[3 렌더] {rendered[:40]}...")
+    print(f"[3 모달] open={modal_open} 내용={rendered[:40]}...")
     print(f"[4 벽 불변] {walls_before}→{walls_after}")
     assert body1.get("building_orientation") == "남", "방위 안 실림"
     assert body1.get("bedrooms") == 3 and body1.get("baths") == 1, "개수 안 실림"
     assert len(body1.get("boundary_mm") or []) >= 3, "boundary 안 실림"
     assert "fixed_rooms" in body1 and "current_rooms" in body1, "fixed/current 키 없음"
     assert body1.get("trend") == "", "빈 트렌드 처리 실패"
-    assert "남향" in rendered, "응답 텍스트 렌더 실패"
+    assert "남향" in rendered, "응답 텍스트 모달 렌더 실패"
+    assert modal_open, "모달이 열리지 않음"
     assert walls_before == walls_after == 0, "조언 요청이 벽을 생성함"
+    # 모달 닫기 (Esc) — 다음 테스트를 위해
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    closed = not page.evaluate("document.getElementById('advice-modal-overlay').classList.contains('open')")
+    print(f"[5 Esc 닫기] closed={closed}")
+    assert closed, "Esc로 모달이 안 닫힘"
 
     # ── 6. 직사각형 방 하나 그린 뒤 다시 조언 → current_rooms 반영 ──
     r = page.evaluate(FIND_RECT)
