@@ -2943,6 +2943,17 @@ async function enterDesignMode(unit) {
     new THREE.MeshBasicMaterial({ color: 0x1b1b24, side: THREE.DoubleSide }));
   floor.rotation.x = Math.PI / 2; floor.position.y = -0.01;
   designGroup.add(floor);
+  // 원본 도면 참고선 — 이 세대 방 폴리곤을 반투명 선으로 (y=0.005, designGroup 포함 → 자동 정리)
+  if (parsedData && parsedData.rooms) {
+    const _origMat = new THREE.LineBasicMaterial({ color: 0x9090b0, transparent: true, opacity: 0.35 });
+    parsedData.rooms.filter(r => r.unit === unit).forEach(rm => {
+      if (!rm.polygon_mm || rm.polygon_mm.length < 3) return;
+      const pts = [...rm.polygon_mm, rm.polygon_mm[0]].map(
+        p => new THREE.Vector3(p[0] / 1000, 0.005, p[1] / 1000));
+      designGroup.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts), _origMat));
+    });
+  }
   // 외곽 봉투 외곽선 + 외곽 벽(수직 평면)
   const ring3 = [...boundary, boundary[0]].map(p => new THREE.Vector3(p[0] / 1000, 0.05, p[1] / 1000));
   designGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring3),
