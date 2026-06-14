@@ -472,6 +472,67 @@ def _default_room_counts(area_m2):
     return rooms, baths
 
 
+def _max_inscribed_rect(region, target_cells=56):
+    """region(Polygon/MultiPolygon) 안의 최대 축정렬 내접 직사각형 근사.
+    긴 변을 target_cells개로 격자화 → 셀 중심 in region 불리언 → 히스토그램 DP로 최대
+    1-직사각형 → mm 환산 후 '안쪽으로' 100mm 스냅(밖으로 안 삐져나가게). 퇴화 시 None.
+    AI에게 '여기 안은 안 잘린다'는 안전 배치 영역을 주기 위함."""
+    import math as _math
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+    if region is None or region.is_empty:
+        return None
+    minx, miny, maxx, maxy = region.bounds
+    W, H = maxx - minx, maxy - miny
+    if W <= 0 or H <= 0:
+        return None
+    cell = max(W, H) / target_cells
+    if cell <= 0:
+        return None
+    cols = max(1, int(_math.ceil(W / cell)))
+    rows = max(1, int(_math.ceil(H / cell)))
+    pr = prep(region)
+    # 셀의 '네 모서리'가 모두 영역에 덮이면(covers=경계 포함) 그 셀은 영역에 완전히 든다.
+    # (중심만 보면 빗변 등에서 사각형이 영역 밖으로 삐져나옴 → 셀 모서리 기준으로 보수적 판정.)
+    col_in = [[pr.covers(Point(minx + c * cell, miny + r * cell))
+               for c in range(cols + 1)] for r in range(rows + 1)]
+    grid = [[col_in[r][c] and col_in[r][c + 1] and col_in[r + 1][c] and col_in[r + 1][c + 1]
+             for c in range(cols)] for r in range(rows)]
+    best = (0, 0, 0, 0, 0)   # area_cells, r0, c0, r1, c1
+    heights = [0] * cols
+    for r in range(rows):
+        for c in range(cols):
+            heights[c] = heights[c] + 1 if grid[r][c] else 0
+        stack = []   # 히스토그램 최대 직사각형(스택)
+        c = 0
+        while c <= cols:
+            h = heights[c] if c < cols else 0
+            start = c
+            while stack and stack[-1][1] >= h:
+                s_c, s_h = stack.pop()
+                area = s_h * (c - s_c)
+                if area > best[0]:
+                    best = (area, r - s_h + 1, s_c, r, c - 1)
+                start = s_c
+            stack.append((start, h))
+            c += 1
+    if best[0] == 0:
+        return None
+    _, r0, c0, r1, c1 = best
+    x0 = minx + c0 * cell
+    x1 = minx + (c1 + 1) * cell
+    y0 = miny + r0 * cell
+    y1 = miny + (r1 + 1) * cell
+    # 안쪽으로 100mm 스냅 (밖으로 안 삐져나가게)
+    sx0 = _math.ceil(x0 / 100) * 100
+    sy0 = _math.ceil(y0 / 100) * 100
+    sx1 = _math.floor(x1 / 100) * 100
+    sy1 = _math.floor(y1 / 100) * 100
+    if sx1 <= sx0 or sy1 <= sy0:
+        return None
+    return (sx0, sy0, sx1, sy1)
+
+
 _LAYOUT_SYSTEM = (
     "당신은 시공업자를 돕는 주거 평면 설계 보조다. 주어진 '빈 외곽'(한 세대의 벽 없는 "
     "내부 공간) 안에 방을 '축정렬 직사각형'으로 배치한 평면 초안을 만든다. 벽 선분이 "
@@ -507,14 +568,15 @@ _LAYOUT_SYSTEM = (
     "14. 배관 효율: 물 쓰는 공간(욕실·주방·다용도실)은 서로 인접 배치한다.\n"
     "15. 방위가 주어지면: 남향 외벽=거실·침실 우선, 북향=욕실·주방·다용도실, "
     "동향=침실(아침 햇빛), 서향=거실 가능하나 과열 주의.\n"
-    "[출력] 오직 JSON만. 산문·설명·마크다운 펜스 금지. 형식:\n"
+    "[출력] 응답의 첫 글자는 반드시 '{'. 산문·사고과정·설명·영어·마크다운 펜스 금지, "
+    "오직 JSON만 출력한다. 형식:\n"
     '{"rooms":[{"name":"거실","x":0,"y":0,"w":4000,"h":3000}, ...]}  '
     "(x,y=좌상단 mm, w=너비, h=높이, 모두 100의 배수 정수)"
 )
 
 
 def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
-                         fixed_rooms=None, avail_bbox=None,
+                         fixed_rooms=None, avail_bbox=None, inner_rect=None,
                          building_orientation=None, feedback=None):
     """레이아웃 생성 프롬프트.
     고정 방이 있으면 전체 외곽 bbox + 점유 구역을 100mm 격자 스냅 좌표 + 비겹침 조건으로
@@ -538,6 +600,17 @@ def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
         f"= 가로 {round((bx1 - bx0) / 1000, 2)}m × 세로 {round((by1 - by0) / 1000, 2)}m, "
         f"전용면적 약 {area_m2}㎡"
     )
+
+    # 안전 배치 영역(최대 내접 직사각형): 이 안은 절대 안 잘림 → 큰 방 우선 앵커
+    if inner_rect:
+        ix0, iy0, ix1, iy1 = inner_rect
+        iarea = round((ix1 - ix0) * (iy1 - iy0) / 1e6, 1)
+        lines.append(
+            f"[안전 배치 영역] [{int(ix0)},{int(iy0)},{int(ix1)},{int(iy1)}] = {iarea}㎡. "
+            f"이 직사각형 안은 절대 잘리지 않는다. 거실과 큰 침실을 먼저 이 영역 안에 "
+            f"앵커로 배치하고, 나머지 방은 외곽 폴리곤을 참고하되 이 영역에서 멀어질수록 "
+            f"잘릴 위험이 커진다."
+        )
 
     # 방위: 외곽 4변에 방위 라벨 + 방향별 배치 힌트
     ed = _edge_directions(building_orientation)
@@ -594,6 +667,7 @@ def _build_layout_prompt(boundary, bbox, area_m2, unit, rooms, baths,
         )
     if feedback:
         lines.append(feedback)
+    lines.append("출력은 첫 글자가 '{'인 JSON만. 산문·설명·사고과정·영어 금지.")
     return "\n".join(lines)
 
 
@@ -693,36 +767,55 @@ def _rects_to_rooms_and_walls(rects, boundary, clip_poly=None):
 
 
 def _generate_with_retries(build_prompt, clip_region, outline_poly, boundary, clip_poly,
-                           bedrooms_req, baths_req, orientation, caller, max_tries=3):
+                           bedrooms_req, baths_req, orientation, caller, max_tries=3,
+                           prose_budget=2):
     """AI 호출(caller(prompt)->텍스트)을 검증·재생성으로 감싼다.
     HARD 위반 0이면 즉시 채택, 아니면 _violations_feedback를 붙여 재요청(최대 max_tries).
-    3회 후 best=min(HARD수, SOFT수, −방수). caller 주입 가능(키 없이 단위검증).
+    ★산문/파싱 실패는 정상 max_tries를 차감하지 않고 별도 prose_budget(기본 +2회)으로
+    재시도(소예산 소진 후 또 실패하면 그때 정상 시도 1회로 친다 → 종료 보장).
+    3회 후 best=min(HARD수, SOFT수, −방수). best가 ok=False이고 HARD가 침실 폭/면적에
+    몰리면(형상 한계) warnings 최상단에 형상 경고를 prepend. caller 주입 가능(키 없이 단위검증).
     반환: (room_list, walls, warnings, ok, attempts, clipped) / 유효 시도 0이면 None
           (단, caller 예외만 있었으면 그 예외를 re-raise)."""
     feedback, last_exc = "", None
     attempts_log = []   # (hard, soft, nrooms, clipped, rects)
-    for i in range(max_tries):
+    valid_tries = 0
+    while valid_tries < max_tries:
         prompt = build_prompt(feedback)
+        n = len(attempts_log) + 1
         try:
             text = caller(prompt)
         except Exception as e:
             last_exc = e
+            if prose_budget > 0:
+                prose_budget -= 1
+                feedback = "[직전 호출이 실패했다. 오직 {\"rooms\":[...]} JSON만 다시 출력하라.]"
+                print(f"[generate-layout] call {n}: caller 예외 {e} (산문예산 사용, 정상시도 미차감)")
+                continue
             attempts_log.append((999, 999, 0, [], []))
+            valid_tries += 1
             feedback = "[직전 호출이 실패했다. 오직 {\"rooms\":[...]} JSON만 다시 출력하라.]"
-            print(f"[generate-layout] attempt {i+1}/{max_tries}: caller 예외 {e}")
+            print(f"[generate-layout] call {n}: caller 예외 {e} (산문예산 소진)")
             continue
         rects = _parse_rooms_json(text)
         if not rects:
+            if prose_budget > 0:
+                prose_budget -= 1
+                feedback = "[직전 출력이 JSON으로 파싱되지 않았다. 산문·펜스 없이 {\"rooms\":[...]} JSON만 출력하라.]"
+                print(f"[generate-layout] call {n}: 파싱 실패 (산문예산 사용, 정상시도 미차감)")
+                continue
             attempts_log.append((999, 999, 0, [], []))
+            valid_tries += 1
             feedback = "[직전 출력이 JSON으로 파싱되지 않았다. 산문·펜스 없이 {\"rooms\":[...]} JSON만 출력하라.]"
-            print(f"[generate-layout] attempt {i+1}/{max_tries}: 파싱 실패")
+            print(f"[generate-layout] call {n}: 파싱 실패 (산문예산 소진)")
             continue
+        valid_tries += 1
         clipped = _clipped_rooms(rects, clip_region)
         V = _validate_layout(clipped, outline_poly, bedrooms_req, baths_req, orientation)
         hard = [v for v in V if v["severity"] == "hard"]
         soft = [v for v in V if v["severity"] == "soft"]
         attempts_log.append((len(hard), len(soft), len(clipped), clipped, rects))
-        print(f"[generate-layout] attempt {i+1}/{max_tries}: HARD {len(hard)} · SOFT {len(soft)} · 방 {len(clipped)}")
+        print(f"[generate-layout] attempt {valid_tries}/{max_tries}: HARD {len(hard)} · SOFT {len(soft)} · 방 {len(clipped)}")
         for v in hard:
             print(f"    HARD: {v['msg']}")
         for v in soft:
@@ -741,7 +834,32 @@ def _generate_with_retries(build_prompt, clip_region, outline_poly, boundary, cl
     room_list, walls = _rects_to_rooms_and_walls(rects, boundary, clip_poly=clip_poly)
     Vbest = _validate_layout(clipped, outline_poly, bedrooms_req, baths_req, orientation)
     warnings = [v["msg"] for v in Vbest]
-    return room_list, walls, warnings, (hard_n == 0), len(attempts_log), clipped
+    ok = (hard_n == 0)
+
+    # 트리거2: 끝까지 ok=False이고 HARD가 '침실 폭/면적'에 몰리면 형상 한계 경고.
+    # 규격 충족 침실(폭≥2.4m·면적≥7㎡·채광OK) 수 K를 세어 요청 침실 수 M > K이면 prepend.
+    if not ok:
+        bed_spec_hard = [v for v in Vbest if v["severity"] == "hard"
+                         and v["cat"] == "bedroom" and v["rule"] in ("width", "area")]
+        if bed_spec_hard:
+            K = 0
+            for c in clipped:
+                if _room_category(c["name"]) != "bedroom":
+                    continue
+                poly = c["poly"]
+                if (_short_side(poly) >= _ARCH["bedroom"]["min_w"] - 1
+                        and poly.area / 1e6 >= _ARCH["bedroom"]["min_area"] - 0.05
+                        and _touches_outer(poly, outline_poly)):
+                    K += 1
+            if bedrooms_req > K:
+                N = round(outline_poly.area / 1e6)
+                warnings.insert(
+                    0,
+                    f"이 세대 {N}㎡·형상상 규격 침실 {bedrooms_req}개는 어렵습니다"
+                    f"(적합 {K}개). 좁은 모서리는 직접 마감하세요.",
+                )
+
+    return room_list, walls, warnings, ok, len(attempts_log), clipped
 
 
 def _postprocess_walls(walls, boundary, clip_poly=None):
@@ -881,6 +999,19 @@ async def generate_layout(payload: dict):
     # 방위(향): 알면 방향별 배치 강화, 모름이면 채광 유무만
     orientation = (payload.get("building_orientation") or "").strip() or None
 
+    # 트리거1(용량): 침실×7 + 거실12 + 욕실×3 최소 필요면적 > 사용가능면적이면 AI 호출 전 422.
+    avail_area = round(avail.area / 1e6, 1)
+    need = rooms * 7 + 12 + baths * 3
+    if need > avail_area:
+        raise HTTPException(
+            422,
+            f"전용 {avail_area}㎡로는 침실 {rooms}개+거실+욕실 {baths}개의 최소 {need}㎡를 "
+            f"담을 수 없습니다. 방·욕실 개수를 줄여 보세요.",
+        )
+
+    # 안전 배치 영역(최대 내접 직사각형) — AI에게 '안 잘리는 구역' 힌트(큰 방 우선 앵커)
+    inner_rect = _max_inscribed_rect(avail)
+
     clip_poly = avail if fixed_polys else None
     clip_region = avail   # 고정 없으면 avail==bpoly
 
@@ -896,7 +1027,7 @@ async def generate_layout(payload: dict):
     def _bp(feedback):
         return _build_layout_prompt(
             boundary, bbox, area_m2, unit, rooms, baths,
-            fixed_rooms=fixed_rooms, avail_bbox=avail_bbox,
+            fixed_rooms=fixed_rooms, avail_bbox=avail_bbox, inner_rect=inner_rect,
             building_orientation=orientation, feedback=feedback,
         )
 
